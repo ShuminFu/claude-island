@@ -102,6 +102,9 @@ actor SessionStore {
         case let .clearDetected(sessionID):
             await self.processClearDetected(sessionID: sessionID)
 
+        case let .markAsRead(sessionID):
+            self.processMarkAsRead(sessionID: sessionID)
+
         case let .sessionEnded(sessionID):
             await self.processSessionEnd(sessionID: sessionID)
 
@@ -328,7 +331,16 @@ actor SessionStore {
         let newPhase = event.determinePhase()
 
         if session.phase.canTransition(to: newPhase) {
+            let wasAttention = session.phase.needsAttention
             session.phase = newPhase
+            // Mark unread when transitioning TO an attention-needing phase
+            if !wasAttention && newPhase.needsAttention {
+                session.hasUnreadUpdate = true
+            }
+            // Clear unread when user resumes interaction
+            if newPhase == .processing {
+                session.hasUnreadUpdate = false
+            }
         } else {
             Self.logger
                 .debug(
@@ -861,6 +873,12 @@ actor SessionStore {
     }
 
     // MARK: - Interrupt Processing
+
+    private func processMarkAsRead(sessionID: String) {
+        guard var session = sessions[sessionID] else { return }
+        session.hasUnreadUpdate = false
+        self.sessions[sessionID] = session
+    }
 
     private func processInterrupt(sessionID: String) async {
         guard var session = sessions[sessionID] else { return }

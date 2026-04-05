@@ -558,6 +558,29 @@ struct NotchView: View {
             // Don't intercept keys with Command modifier (system shortcuts, Cmd+V in chat)
             if event.modifierFlags.contains(.command) { return event }
 
+            // Vim-like modal behavior: check if a text field has focus ("insert mode")
+            let isTextFieldFocused: Bool = {
+                guard let firstResponder = NSApp.keyWindow?.firstResponder else { return false }
+                return firstResponder is NSTextView
+            }()
+
+            if isTextFieldFocused {
+                if event.keyCode == 53 { // Escape → exit insert mode (unfocus text field)
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    return nil // Consume — stay in current view, just unfocus
+                }
+                return event // All other keys pass through to text field
+            }
+
+            // Normal mode: Tab in chat view → enter insert mode (focus text input)
+            if event.keyCode == 48 { // Tab
+                if case .chat = vm.contentType {
+                    vm.requestChatInputFocus = true
+                    return nil
+                }
+            }
+
+            // Normal mode: let ViewModel handle navigation
             let sorted = sm.instances.sortedByPriority()
             if vm.handleKeyDown(keyCode: event.keyCode, sortedInstances: sorted) {
                 return nil // Consume the event

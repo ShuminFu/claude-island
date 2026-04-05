@@ -94,6 +94,7 @@ final class ClaudeSessionMonitor {
             await SessionStore.shared.process(
                 .permissionApproved(sessionID: sessionID, toolUseID: permission.toolUseID),
             )
+            await SessionStore.shared.process(.markAsRead(sessionID: sessionID))
         }
     }
 
@@ -114,6 +115,7 @@ final class ClaudeSessionMonitor {
             await SessionStore.shared.process(
                 .permissionDenied(sessionID: sessionID, toolUseID: permission.toolUseID, reason: reason),
             )
+            await SessionStore.shared.process(.markAsRead(sessionID: sessionID))
         }
     }
 

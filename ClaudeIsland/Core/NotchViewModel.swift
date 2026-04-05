@@ -83,6 +83,15 @@ final class NotchViewModel {
     /// Becomes true on first arrow key, false on mouse hover over any row.
     var isKeyboardNavigating = false
 
+    /// When true, ChatView should NOT auto-focus its text input on appear.
+    /// Set when entering chat via keyboard navigation (Vim "normal mode" behavior).
+    /// ChatView reads this once on appear and resets it.
+    var suppressChatInputFocus = false
+
+    /// When true, ChatView should focus its text input (enter "insert mode").
+    /// Set by Tab key in keyboard monitor. ChatView observes and resets.
+    var requestChatInputFocus = false
+
     // MARK: - Geometry
 
     let geometry: NotchGeometry
@@ -235,6 +244,13 @@ final class NotchViewModel {
         }
         self.resetKeyboardSelection()
         self.contentType = .chat(session)
+
+        // Mark session as read when user opens chat
+        if session.hasUnreadUpdate {
+            Task(name: "mark-as-read") {
+                await SessionStore.shared.process(.markAsRead(sessionID: session.sessionID))
+            }
+        }
     }
 
     /// Go back to instances list and clear saved chat state
@@ -257,23 +273,23 @@ final class NotchViewModel {
 
     // MARK: - Keyboard Navigation
 
-    /// Handle a keyboard event. Returns true if the event was consumed.
+    /// Handle a keyboard event using the configured navigation style.
+    /// Returns true if the event was consumed.
     /// Called from the local NSEvent monitor on the main thread.
+    ///
+    /// Spatial model (Apple "negative one screen"):
+    ///   Menu ←── Instances List ──→ Chat
     func handleKeyDown(keyCode: UInt16, sortedInstances: [SessionState]) -> Bool {
-        // Escape is always handled regardless of content type
-        if keyCode == 53 {
-            return self.handleEscape()
-        }
+        let keymap = NavigationKeymap.keymap(for: AppSettings.navigationStyle)
+        guard let action = keymap.action(for: keyCode) else { return false }
 
         switch self.contentType {
         case .instances:
-            return self.handleInstancesKey(keyCode: keyCode, sortedInstances: sortedInstances)
-        case .menu:
-            return self.handleMenuKey(keyCode: keyCode)
+            return self.handleInstancesAction(action, sortedInstances: sortedInstances)
         case .chat:
-            // Chat handles its own keys (text input, Cmd+V).
-            // We only handle Escape (above).
-            return false
+            return self.handleChatAction(action)
+        case .menu:
+            return self.handleMenuAction(action)
         }
     }
 
@@ -281,52 +297,54 @@ final class NotchViewModel {
 
     // MARK: - Keyboard Navigation Helpers
 
-    private func handleEscape() -> Bool {
-        switch self.contentType {
-        case .instances:
-            self.notchClose()
-            return true
-        case .chat:
-            self.exitChat()
-            return true
-        case .menu:
-            self.resetKeyboardSelection()
-            self.contentType = .instances
-            return true
-        }
-    }
-
-    private func handleInstancesKey(keyCode: UInt16, sortedInstances: [SessionState]) -> Bool {
-        switch keyCode {
-        case 126: // Up arrow
+    private func handleInstancesAction(_ action: NavigationAction, sortedInstances: [SessionState]) -> Bool {
+        switch action {
+        case .up:
             self.isKeyboardNavigating = true
             self.moveSelection(by: -1, in: sortedInstances)
             return true
 
-        case 125: // Down arrow
+        case .down:
             self.isKeyboardNavigating = true
             self.moveSelection(by: 1, in: sortedInstances)
             return true
 
-        case 36: // Return/Enter — open chat for selected instance
+        case .right, .confirm:
+            // Navigate right → enter selected chat (suppress auto-focus for Vim normal mode)
+            self.suppressChatInputFocus = true
             guard let selectedID = self.selectedInstanceID,
                   let session = sortedInstances.first(where: { $0.stableID == selectedID })
             else { return false }
             self.showChat(for: session)
             return true
 
-        case 123: // Left arrow — go to menu
+        case .left:
+            // Navigate left → menu
             self.toggleMenu()
             return true
 
+        case .close:
+            self.notchClose()
+            return true
+        }
+    }
+
+    private func handleChatAction(_ action: NavigationAction) -> Bool {
+        switch action {
+        case .left, .close:
+            // Navigate left or back → return to instances
+            self.exitChat()
+            return true
         default:
+            // All other keys pass through to chat (text input, scrolling)
             return false
         }
     }
 
-    private func handleMenuKey(keyCode: UInt16) -> Bool {
-        switch keyCode {
-        case 124: // Right arrow — back to instances
+    private func handleMenuAction(_ action: NavigationAction) -> Bool {
+        switch action {
+        case .right, .close:
+            // Navigate right or back → return to instances
             self.resetKeyboardSelection()
             self.contentType = .instances
             return true

@@ -74,6 +74,8 @@ struct NotchMenuView: View {
 
                         HotkeyPickerRow()
 
+                        NavigationStyleRow(navigationStyle: self.$navigationStyle)
+
                         Divider()
                             .background(Color.white.opacity(0.08))
                             .padding(.vertical, 4)
@@ -207,6 +209,7 @@ struct NotchMenuView: View {
     @State private var hookInstallTask: Task<Void, Never>?
     @State private var showWhatsNew = false
     @State private var showLayoutSettings = false
+    @State private var navigationStyle: NavigationStyle = AppSettings.navigationStyle
     // swiftformat:disable:next wrapAttributes
     @AppStorage("notchAutoExpand")
     private var notchAutoExpand = false
@@ -838,5 +841,55 @@ struct TokenTrackingRow: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - NavigationStyleRow
+
+struct NavigationStyleRow: View {
+    // MARK: Internal
+
+    @Binding var navigationStyle: NavigationStyle
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "keyboard")
+                .font(.system(size: 12))
+                .foregroundColor(self.textColor)
+                .frame(width: 16)
+
+            Text("Navigation")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(self.textColor)
+
+            Spacer()
+
+            Picker("", selection: self.$navigationStyle) {
+                ForEach(NavigationStyle.allCases, id: \.self) { style in
+                    Text(style.rawValue).tag(style)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 160)
+            .onChange(of: self.navigationStyle) { _, newValue in
+                AppSettings.navigationStyle = newValue
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(self.isHovered ? Color.white.opacity(0.08) : Color.clear),
+        )
+        .onHover { self.isHovered = $0 }
+    }
+
+    // MARK: Private
+
+    @State private var isHovered = false
+
+    private var textColor: Color {
+        .white.opacity(self.isHovered ? 1.0 : 0.7)
     }
 }

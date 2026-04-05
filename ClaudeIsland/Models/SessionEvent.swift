@@ -64,6 +64,11 @@ nonisolated enum SessionEvent: Sendable {
     /// User issued /clear command - reset UI state while keeping session alive
     case clearDetected(sessionID: String)
 
+    // MARK: - Read/Unread Status
+
+    /// Mark a session as read (user viewed it)
+    case markAsRead(sessionID: String)
+
     // MARK: - Session Lifecycle
 
     /// Session has ended
@@ -221,6 +226,7 @@ nonisolated extension SessionEvent {
              let .permissionSocketFailed(sessionID, _),
              let .interruptDetected(sessionID),
              let .clearDetected(sessionID),
+             let .markAsRead(sessionID),
              let .sessionEnded(sessionID),
              let .loadHistory(sessionID, _),
              let .toolCompleted(sessionID, _, _),
@@ -256,6 +262,8 @@ nonisolated extension SessionEvent: CustomStringConvertible {
             "interruptDetected(session: \(sessionID.prefix(8)))"
         case let .clearDetected(sessionID):
             "clearDetected(session: \(sessionID.prefix(8)))"
+        case let .markAsRead(sessionID):
+            "markAsRead(session: \(sessionID.prefix(8)))"
         case let .sessionEnded(sessionID):
             "sessionEnded(session: \(sessionID.prefix(8)))"
         case let .loadHistory(sessionID, _):

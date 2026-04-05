@@ -38,6 +38,7 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
             usage: nil,
         ),
         needsClearReconciliation: Bool = false,
+        hasUnreadUpdate: Bool = false,
         lastActivity: Date = Date(),
         createdAt: Date = Date(),
     ) {
@@ -53,6 +54,7 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
         self.subagentState = subagentState
         self.conversationInfo = conversationInfo
         self.needsClearReconciliation = needsClearReconciliation
+        self.hasUnreadUpdate = hasUnreadUpdate
         self.lastActivity = lastActivity
         self.createdAt = createdAt
     }
@@ -100,6 +102,11 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
     /// When true, the next file update should reconcile chatItems with parser state
     /// This removes pre-/clear items that no longer exist in the JSONL
     var needsClearReconciliation: Bool
+
+    // MARK: - Unread Status
+
+    /// Whether this session has an unread status change (agent finished, permission request arrived)
+    var hasUnreadUpdate: Bool
 
     // MARK: - Timestamps
 

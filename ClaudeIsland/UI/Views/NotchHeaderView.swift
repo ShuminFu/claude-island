@@ -276,9 +276,13 @@ struct SessionStateDots: View {
             let overflow = self.sortedActiveSessions.count - Self.maxDots
 
             ForEach(displaySessions) { session in
-                Circle()
-                    .fill(self.color(for: session))
-                    .frame(width: Self.dotSize, height: Self.dotSize)
+                if session.hasUnreadUpdate {
+                    UnreadDot(color: self.color(for: session))
+                } else {
+                    Circle()
+                        .fill(self.color(for: session))
+                        .frame(width: Self.dotSize, height: Self.dotSize)
+                }
             }
 
             if overflow > 0 {
@@ -341,6 +345,37 @@ struct SessionStateDots: View {
         case .idle,
              .ended:
             Color.white.opacity(0.25)
+        }
+    }
+}
+
+// MARK: - UnreadDot
+
+/// A dot with a pulsing outer ring to indicate unread status
+struct UnreadDot: View {
+    let color: Color
+
+    @State private var isPulsing = false
+
+    var body: some View {
+        ZStack {
+            // Pulsing outer ring
+            Circle()
+                .stroke(self.color.opacity(self.isPulsing ? 0.3 : 0.7), lineWidth: 1.5)
+                .frame(width: 10, height: 10)
+                .scaleEffect(self.isPulsing ? 1.3 : 1.0)
+                .opacity(self.isPulsing ? 0.0 : 1.0)
+
+            // Inner dot
+            Circle()
+                .fill(self.color)
+                .frame(width: SessionStateDots.dotSize, height: SessionStateDots.dotSize)
+        }
+        .frame(width: SessionStateDots.dotSize, height: SessionStateDots.dotSize)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
+                self.isPulsing = true
+            }
         }
     }
 }

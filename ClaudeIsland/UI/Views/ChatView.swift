@@ -164,17 +164,28 @@ struct ChatView: View {
             }
         }
         .onAppear {
-            // Auto-focus input when chat opens and tmux messaging is available
-            self.focusInputTask?.cancel()
-            self.focusInputTask = Task(name: "focus-on-appear") {
-                try? await Task.sleep(for: .seconds(0.3))
-                guard !Task.isCancelled else { return }
-                if self.canSendMessages {
-                    self.isInputFocused = true
+            // Auto-focus input when chat opens and tmux messaging is available,
+            // unless entering via keyboard navigation (Vim "normal mode")
+            if self.viewModel.suppressChatInputFocus {
+                self.viewModel.suppressChatInputFocus = false
+            } else {
+                self.focusInputTask?.cancel()
+                self.focusInputTask = Task(name: "focus-on-appear") {
+                    try? await Task.sleep(for: .seconds(0.3))
+                    guard !Task.isCancelled else { return }
+                    if self.canSendMessages {
+                        self.isInputFocused = true
+                    }
                 }
             }
             // Install keyboard event monitor for Cmd+V paste
             self.installKeyEventMonitor()
+        }
+        .onChange(of: self.viewModel.requestChatInputFocus) { _, requested in
+            if requested {
+                self.viewModel.requestChatInputFocus = false
+                self.isInputFocused = true
+            }
         }
         .onDisappear {
             // Clean up key event monitor to prevent memory leaks

@@ -20,6 +20,10 @@ extension [SessionState] {
             if priorityLhs != priorityRhs {
                 return priorityLhs < priorityRhs
             }
+            // Within same priority: unread before read
+            if lhs.hasUnreadUpdate != rhs.hasUnreadUpdate {
+                return lhs.hasUnreadUpdate
+            }
             let dateLhs = lhs.lastUserMessageDate ?? lhs.lastActivity
             let dateRhs = rhs.lastUserMessageDate ?? rhs.lastActivity
             return dateLhs > dateRhs

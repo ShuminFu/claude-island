@@ -275,6 +275,21 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: Keys.globalHotkeyEnabled) }
     }
 
+    // MARK: - Navigation Style
+
+    /// Keyboard navigation style (arrows, vim, or both)
+    static var navigationStyle: NavigationStyle {
+        get {
+            guard let raw = defaults.string(forKey: Keys.navigationStyle),
+                  let style = NavigationStyle(rawValue: raw)
+            else {
+                return .arrows
+            }
+            return style
+        }
+        set { defaults.set(newValue.rawValue, forKey: Keys.navigationStyle) }
+    }
+
     // MARK: Private
 
     // MARK: - Keys
@@ -294,6 +309,7 @@ enum AppSettings {
         static let verboseMode = "verboseMode"
         static let globalHotkey = "globalHotkey"
         static let globalHotkeyEnabled = "globalHotkeyEnabled"
+        static let navigationStyle = "navigationStyle"
     }
 
     private static let defaults = UserDefaults.standard

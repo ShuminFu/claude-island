@@ -195,7 +195,7 @@ struct InstanceRow: View {
         switch self.session.phase {
         case .processing: "Processing..."
         case .compacting: "Compacting..."
-        case .waitingForInput: "Ready"
+        case .waitingForInput: self.session.hasUnreadUpdate ? "Task complete" : "Ready"
         case .waitingForApproval: "Waiting for approval"
         case .idle: "Idle"
         case .ended: "Ended"
@@ -229,8 +229,8 @@ struct InstanceRow: View {
                                 .onAppear { self.isTitleFocused = true }
                         } else {
                             Text(self.displayTitle)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(.white)
+                                .font(.system(size: 13, weight: self.session.hasUnreadUpdate ? .semibold : .medium))
+                                .foregroundColor(self.session.hasUnreadUpdate ? .white : .white.opacity(0.85))
                                 .lineLimit(1)
                         }
 
@@ -369,9 +369,14 @@ struct InstanceRow: View {
                     .foregroundColor(TerminalColors.amber)
             }
         case .waitingForInput:
-            Circle()
-                .fill(TerminalColors.green)
-                .frame(width: 6, height: 6)
+            if self.session.hasUnreadUpdate {
+                UnreadDot(color: TerminalColors.green)
+                    .frame(width: 14, height: 14)
+            } else {
+                Circle()
+                    .fill(TerminalColors.green)
+                    .frame(width: 6, height: 6)
+            }
         case .idle,
              .ended:
             Circle()

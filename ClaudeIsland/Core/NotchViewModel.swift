@@ -74,6 +74,15 @@ final class NotchViewModel {
     var contentType: NotchContentType = .instances
     var isHovering = false
 
+    // MARK: - Keyboard Navigation State
+
+    /// Selected instance stableID for keyboard navigation
+    var selectedInstanceID: String?
+
+    /// Whether keyboard navigation is active (shows selection highlight).
+    /// Becomes true on first arrow key, false on mouse hover over any row.
+    var isKeyboardNavigating = false
+
     // MARK: - Geometry
 
     let geometry: NotchGeometry
@@ -160,6 +169,12 @@ final class NotchViewModel {
         return stream
     }
 
+    /// Reset keyboard selection state
+    func resetKeyboardSelection() {
+        self.selectedInstanceID = nil
+        self.isKeyboardNavigating = false
+    }
+
     func notchOpen(reason: NotchOpenReason = .unknown) {
         self.openReason = reason
         self.status = .opened
@@ -185,6 +200,7 @@ final class NotchViewModel {
         if case let .chat(session) = contentType {
             self.currentChatSession = session
         }
+        self.resetKeyboardSelection()
         self.status = .closed
         self.contentType = .instances
     }
@@ -208,6 +224,7 @@ final class NotchViewModel {
     }
 
     func toggleMenu() {
+        self.resetKeyboardSelection()
         self.contentType = self.contentType == .menu ? .instances : .menu
     }
 
@@ -216,12 +233,14 @@ final class NotchViewModel {
         if case let .chat(current) = contentType, current.sessionID == session.sessionID {
             return
         }
+        self.resetKeyboardSelection()
         self.contentType = .chat(session)
     }
 
     /// Go back to instances list and clear saved chat state
     func exitChat() {
         self.currentChatSession = nil
+        self.resetKeyboardSelection()
         self.contentType = .instances
     }
 
@@ -236,7 +255,100 @@ final class NotchViewModel {
         }
     }
 
+    // MARK: - Keyboard Navigation
+
+    /// Handle a keyboard event. Returns true if the event was consumed.
+    /// Called from the local NSEvent monitor on the main thread.
+    func handleKeyDown(keyCode: UInt16, sortedInstances: [SessionState]) -> Bool {
+        // Escape is always handled regardless of content type
+        if keyCode == 53 {
+            return self.handleEscape()
+        }
+
+        switch self.contentType {
+        case .instances:
+            return self.handleInstancesKey(keyCode: keyCode, sortedInstances: sortedInstances)
+        case .menu:
+            return self.handleMenuKey(keyCode: keyCode)
+        case .chat:
+            // Chat handles its own keys (text input, Cmd+V).
+            // We only handle Escape (above).
+            return false
+        }
+    }
+
     // MARK: Private
+
+    // MARK: - Keyboard Navigation Helpers
+
+    private func handleEscape() -> Bool {
+        switch self.contentType {
+        case .instances:
+            self.notchClose()
+            return true
+        case .chat:
+            self.exitChat()
+            return true
+        case .menu:
+            self.resetKeyboardSelection()
+            self.contentType = .instances
+            return true
+        }
+    }
+
+    private func handleInstancesKey(keyCode: UInt16, sortedInstances: [SessionState]) -> Bool {
+        switch keyCode {
+        case 126: // Up arrow
+            self.isKeyboardNavigating = true
+            self.moveSelection(by: -1, in: sortedInstances)
+            return true
+
+        case 125: // Down arrow
+            self.isKeyboardNavigating = true
+            self.moveSelection(by: 1, in: sortedInstances)
+            return true
+
+        case 36: // Return/Enter — open chat for selected instance
+            guard let selectedID = self.selectedInstanceID,
+                  let session = sortedInstances.first(where: { $0.stableID == selectedID })
+            else { return false }
+            self.showChat(for: session)
+            return true
+
+        case 123: // Left arrow — go to menu
+            self.toggleMenu()
+            return true
+
+        default:
+            return false
+        }
+    }
+
+    private func handleMenuKey(keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case 124: // Right arrow — back to instances
+            self.resetKeyboardSelection()
+            self.contentType = .instances
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func moveSelection(by delta: Int, in sortedInstances: [SessionState]) {
+        guard !sortedInstances.isEmpty else { return }
+
+        if let currentID = self.selectedInstanceID,
+           let currentIndex = sortedInstances.firstIndex(where: { $0.stableID == currentID }) {
+            let newIndex = (currentIndex + delta + sortedInstances.count) % sortedInstances.count
+            self.selectedInstanceID = sortedInstances[newIndex].stableID
+        } else {
+            // No selection yet — select first (down) or last (up)
+            self.selectedInstanceID = delta > 0
+                ? sortedInstances.first?.stableID
+                : sortedInstances.last?.stableID
+        }
+    }
 
     private var statusContinuation: AsyncStream<NotchStatus>.Continuation?
 

@@ -5,7 +5,29 @@
 //  Helper functions for session phase display
 //
 
+import Foundation
 import SwiftUI
+
+// MARK: - Instance Sorting
+
+extension [SessionState] {
+    /// Sorted by phase priority (active > waitingForInput > idle),
+    /// then by last user message date (most recent first).
+    func sortedByPriority() -> [SessionState] {
+        self.sorted { lhs, rhs in
+            let priorityLhs = lhs.phase.sortPriority
+            let priorityRhs = rhs.phase.sortPriority
+            if priorityLhs != priorityRhs {
+                return priorityLhs < priorityRhs
+            }
+            let dateLhs = lhs.lastUserMessageDate ?? lhs.lastActivity
+            let dateRhs = rhs.lastUserMessageDate ?? rhs.lastActivity
+            return dateLhs > dateRhs
+        }
+    }
+}
+
+// MARK: - SessionPhaseHelpers
 
 enum SessionPhaseHelpers {
     /// Get color for session phase

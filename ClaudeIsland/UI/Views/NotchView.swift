@@ -118,6 +118,7 @@ struct NotchView: View {
     @State private var clawdColor: Color = AppSettings.clawdColor
     @State private var clawdAlwaysVisible: Bool = AppSettings.clawdAlwaysVisible
     @State private var cachedClosedLayout: ModuleLayout = .empty
+    @State private var keyboardMonitor: Any?
     @Namespace private var activityNamespace
 
     private var updateManager = UpdateManager.shared
@@ -523,7 +524,13 @@ struct NotchView: View {
             if self.viewModel.openReason == .click || self.viewModel.openReason == .hover {
                 self.waitingForInputTimestamps.removeAll()
             }
+            // Install keyboard monitor when panel opens
+            if newStatus == .opened {
+                self.installKeyboardMonitor()
+            }
         case .closed:
+            // Remove keyboard monitor when panel closes
+            self.removeKeyboardMonitor()
             // Don't hide on non-notched devices - users need a visible target
             guard self.viewModel.hasPhysicalNotch else { return }
             // Don't hide when always-visible is enabled
@@ -536,6 +543,33 @@ struct NotchView: View {
                     self.isVisible = false
                 }
             }
+        }
+    }
+
+    // MARK: - Keyboard Navigation
+
+    private func installKeyboardMonitor() {
+        self.removeKeyboardMonitor()
+        let vm = self.viewModel
+        let sm = self.sessionMonitor
+        self.keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Don't intercept keys while recording a new hotkey shortcut
+            guard !GlobalHotkeyManager.shared.isRecording else { return event }
+            // Don't intercept keys with Command modifier (system shortcuts, Cmd+V in chat)
+            if event.modifierFlags.contains(.command) { return event }
+
+            let sorted = sm.instances.sortedByPriority()
+            if vm.handleKeyDown(keyCode: event.keyCode, sortedInstances: sorted) {
+                return nil // Consume the event
+            }
+            return event
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        if let monitor = self.keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            self.keyboardMonitor = nil
         }
     }
 

@@ -60,31 +60,37 @@ class NotchWindowController: NSWindowController {
 
         notchWindow.setFrame(windowFrame, display: true)
 
-        // Dynamically toggle mouse event handling based on notch state:
-        // - Closed: ignoresMouseEvents = true (clicks pass through to menu bar/apps)
-        // - Opened: ignoresMouseEvents = false (buttons inside panel work)
+        // Mouse events are always enabled. The window has backgroundColor = .clear
+        // and isOpaque = false, so macOS per-pixel transparency handles click routing:
+        // - Clicks on transparent areas pass through to menu bar / windows behind
+        // - Clicks on the pill (non-transparent SwiftUI content) are delivered here
+        // For edge cases where non-zero alpha pixels exist outside the hitTestRect,
+        // NotchPanel.sendEvent temporarily ignores + reposts so the click passes through.
+        notchWindow.ignoresMouseEvents = false
+
         let statusStream = self.viewModel.makeStatusStream()
         self.statusTask = Task(name: "notch-status-stream") { @MainActor [weak notchWindow, weak viewModel] in
             for await status in statusStream {
                 switch status {
                 case .opened:
-                    // Accept mouse events when opened so buttons work
+                    // Ensure mouse events are enabled (safety reset after any repost)
                     notchWindow?.ignoresMouseEvents = false
                     // Don't steal focus when opened by notification (task finished)
                     if viewModel?.openReason != .notification {
-                        NSApp.activate(ignoringOtherApps: false)
+                        if viewModel?.openReason == .hotkey {
+                            // Force activation for hotkey opens so local keyboard
+                            // event monitor receives subsequent key events
+                            NSApp.activate()
+                        }
                         notchWindow?.makeKey()
                     }
                 case .closed,
                      .popping:
-                    // Ignore mouse events when closed so clicks pass through
-                    notchWindow?.ignoresMouseEvents = true
+                    // Ensure mouse events are enabled (safety reset after any repost)
+                    notchWindow?.ignoresMouseEvents = false
                 }
             }
         }
-
-        // Start with ignoring mouse events (closed state)
-        notchWindow.ignoresMouseEvents = true
 
         // Perform boot animation after a brief delay (only on initial launch)
         if animateOnLaunch {

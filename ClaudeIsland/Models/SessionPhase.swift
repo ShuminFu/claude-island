@@ -118,6 +118,19 @@ nonisolated enum SessionPhase: Sendable {
         }
     }
 
+    /// Sort priority for instance list ordering.
+    /// Lower number = higher priority (shown first).
+    var sortPriority: Int {
+        switch self {
+        case .waitingForApproval,
+             .processing,
+             .compacting: 0
+        case .waitingForInput: 1
+        case .idle,
+             .ended: 2
+        }
+    }
+
     /// Whether this is a waitingForApproval phase
     @inline(always) nonisolated var isWaitingForApproval: Bool {
         if case .waitingForApproval = self {

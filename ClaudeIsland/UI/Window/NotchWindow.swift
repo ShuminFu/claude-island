@@ -54,10 +54,10 @@ class NotchPanel: NSPanel {
         // Enable tooltips even when app is inactive (needed for panel windows)
         allowsToolTipsWhenApplicationIsInactive = true
 
-        // CRITICAL: Window ignores ALL mouse events
-        // This allows clicks to pass through to the menu bar
-        // We use global event monitors to detect hover/clicks on the notch area
-        ignoresMouseEvents = true
+        // Mouse events are always accepted. Per-pixel transparency (isOpaque = false
+        // + backgroundColor = .clear) ensures clicks on transparent areas pass through
+        // to the menu bar / windows behind. sendEvent handles edge cases via repost.
+        ignoresMouseEvents = false
 
         isReleasedWhenClosed = true
         acceptsMouseMovedEvents = false
@@ -85,14 +85,14 @@ class NotchPanel: NSPanel {
             // Check if any view wants to handle this event
             if let contentView,
                contentView.hitTest(locationInWindow) == nil {
-                // No view wants this event - pass it through to windows behind
-                // by temporarily ignoring mouse events and re-posting
+                // No view wants this event — pass it through to windows behind.
+                // Temporarily ignore mouse events so the reposted CGEvent reaches
+                // the window behind us, then re-enable so we keep intercepting.
                 let screenLocation = convertPoint(toScreen: locationInWindow)
                 ignoresMouseEvents = true
-
-                // Re-post the event after a tiny delay
-                Task(name: "notch-window-mouse-up") { @MainActor [weak self] in
-                    self?.repostMouseEvent(event, at: screenLocation)
+                self.repostMouseEvent(event, at: screenLocation)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                    self?.ignoresMouseEvents = false
                 }
                 return
             }

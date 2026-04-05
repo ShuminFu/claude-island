@@ -35,18 +35,7 @@ struct ClaudeInstancesView: View {
     /// Secondary sort: by last user message date (stable - doesn't change when agent responds)
     /// Note: approval requests stay in their date-based position to avoid layout shift
     private var sortedInstances: [SessionState] {
-        self.sessionMonitor.instances.sorted { lhs, rhs in
-            let priorityLhs = self.phasePriority(lhs.phase)
-            let priorityRhs = self.phasePriority(rhs.phase)
-            if priorityLhs != priorityRhs {
-                return priorityLhs < priorityRhs
-            }
-            // Sort by last user message date (more recent first)
-            // Fall back to lastActivity if no user messages yet
-            let dateLhs = lhs.lastUserMessageDate ?? lhs.lastActivity
-            let dateRhs = rhs.lastUserMessageDate ?? rhs.lastActivity
-            return dateLhs > dateRhs
-        }
+        self.sessionMonitor.instances.sortedByPriority()
     }
 
     // MARK: - Empty State
@@ -65,35 +54,34 @@ struct ClaudeInstancesView: View {
     }
 
     private var instancesList: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(spacing: 2) {
-                ForEach(self.sortedInstances) { session in
-                    InstanceRow(
-                        session: session,
-                        onFocus: { self.focusSession(session) },
-                        onChat: { self.openChat(session) },
-                        onArchive: { self.archiveSession(session) },
-                        onApprove: { self.approveSession(session) },
-                        onReject: { self.rejectSession(session) },
-                    )
-                    .id(session.stableID)
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(spacing: 2) {
+                    ForEach(self.sortedInstances) { session in
+                        InstanceRow(
+                            session: session,
+                            isSelected: self.viewModel.isKeyboardNavigating
+                                && self.viewModel.selectedInstanceID == session.stableID,
+                            onFocus: { self.focusSession(session) },
+                            onChat: { self.openChat(session) },
+                            onArchive: { self.archiveSession(session) },
+                            onApprove: { self.approveSession(session) },
+                            onReject: { self.rejectSession(session) },
+                            onHoverStart: { self.viewModel.isKeyboardNavigating = false },
+                        )
+                        .id(session.stableID)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .onChange(of: self.viewModel.selectedInstanceID) { _, newID in
+                if let newID {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo(newID, anchor: .center)
+                    }
                 }
             }
-            .padding(.vertical, 4)
-        }
-        .scrollBounceBehavior(.basedOnSize)
-    }
-
-    /// Lower number = higher priority
-    /// Approval requests share priority with processing to maintain stable ordering
-    private func phasePriority(_ phase: SessionPhase) -> Int {
-        switch phase {
-        case .waitingForApproval,
-             .processing,
-             .compacting: 0
-        case .waitingForInput: 1
-        case .idle,
-             .ended: 2
         }
     }
 
@@ -130,11 +118,13 @@ struct InstanceRow: View {
     // MARK: Internal
 
     let session: SessionState
+    var isSelected = false
     let onFocus: () -> Void
     let onChat: () -> Void
     let onArchive: () -> Void
     let onApprove: () -> Void
     let onReject: () -> Void
+    var onHoverStart: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -150,9 +140,18 @@ struct InstanceRow: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: self.isEditing)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(self.isHovered ? Color.white.opacity(0.06) : Color.clear),
+                .fill(self.isSelected ? Color.white.opacity(0.10) : (self.isHovered ? Color.white.opacity(0.06) : Color.clear)),
         )
-        .onHover { self.isHovered = $0 }
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(self.isSelected ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1),
+        )
+        .onHover { hovering in
+            self.isHovered = hovering
+            if hovering {
+                self.onHoverStart?()
+            }
+        }
         .onRightClick {
             withAnimation {
                 if !self.isEditing {

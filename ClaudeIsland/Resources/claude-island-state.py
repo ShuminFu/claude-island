@@ -383,13 +383,13 @@ def determine_status(
             return "processing", {}
 
         case "PreToolUse":
-            # No longer registered on PreToolUse (removed to prevent rtk interference,
-            # see Claude Code bug #15897). If called from a stale hook registration,
-            # skip harmlessly.
-            # TODO(anthropics/claude-code#15897): Re-add PreToolUse handling once
-            # upstream fixes parallel hook updatedInput aggregation. Previously
-            # returned "running_tool" with tool_name/tool_input/tool_use_id extras.
-            return "skip", {}
+            extras_pre: ToolExtras = {}
+            if tool := data.get("tool_name"):
+                extras_pre["tool"] = tool
+            extras_pre["tool_input"] = _normalize_tool_input(data.get("tool_input"))
+            if tool_use_id := data.get("tool_use_id"):
+                extras_pre["tool_use_id"] = tool_use_id
+            return "running_tool", extras_pre
 
         case "PostToolUse":
             extras_post: ToolExtras = {}

@@ -76,13 +76,11 @@ class NotchPanel: NSPanel {
     // MARK: - Click-through for areas outside the panel content
 
     override func sendEvent(_ event: NSEvent) {
-        // For mouse events, check if we should pass through
+        // For mouse click events, check if we should pass through
         if event.type == .leftMouseDown || event.type == .leftMouseUp ||
             event.type == .rightMouseDown || event.type == .rightMouseUp {
-            // Get the location in window coordinates
             let locationInWindow = event.locationInWindow
 
-            // Check if any view wants to handle this event
             if let contentView,
                contentView.hitTest(locationInWindow) == nil {
                 // No view wants this event — pass it through to windows behind.
@@ -98,10 +96,45 @@ class NotchPanel: NSPanel {
             }
         }
 
+        // Scroll wheel events on transparent areas must also pass through,
+        // otherwise the panel swallows scrolling in apps behind the overlay.
+        if event.type == .scrollWheel {
+            let locationInWindow = event.locationInWindow
+
+            if let contentView,
+               contentView.hitTest(locationInWindow) == nil {
+                ignoresMouseEvents = true
+                self.repostScrollEvent(event)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                    self?.ignoresMouseEvents = false
+                }
+                return
+            }
+        }
+
         super.sendEvent(event)
     }
 
     // MARK: Private
+
+    private func repostScrollEvent(_ event: NSEvent) {
+        // Convert window location to CGEvent screen coordinates (Y from top)
+        let screenLocation = convertPoint(toScreen: event.locationInWindow)
+        guard let screen = NSScreen.main else { return }
+        let cgPoint = CGPoint(x: screenLocation.x, y: screen.frame.height - screenLocation.y)
+
+        if let cgEvent = CGEvent(source: nil) {
+            cgEvent.type = .scrollWheel
+            cgEvent.location = cgPoint
+            // Pixel-based scrolling (continuous trackpad / high-res mouse)
+            cgEvent.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: Int64(event.scrollingDeltaY))
+            cgEvent.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: Int64(event.scrollingDeltaX))
+            // Line-based scrolling (classic scroll wheel)
+            cgEvent.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: Int64(event.scrollingDeltaY))
+            cgEvent.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: Int64(event.scrollingDeltaX))
+            cgEvent.post(tap: .cghidEventTap)
+        }
+    }
 
     private func repostMouseEvent(_ event: NSEvent, at screenLocation: NSPoint) {
         // Convert to CGEvent coordinate system (Y from top of screen)

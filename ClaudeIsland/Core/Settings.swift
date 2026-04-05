@@ -244,6 +244,37 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: Keys.verboseMode) }
     }
 
+    // MARK: - Global Hotkey
+
+    /// The global keyboard shortcut to toggle the notch panel (nil = disabled)
+    static var globalHotkey: GlobalKeyboardShortcut? {
+        get {
+            guard let data = defaults.data(forKey: Keys.globalHotkey) else {
+                return .default
+            }
+            return try? JSONDecoder().decode(GlobalKeyboardShortcut.self, from: data)
+        }
+        set {
+            if let newValue, let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: Keys.globalHotkey)
+            } else {
+                defaults.removeObject(forKey: Keys.globalHotkey)
+            }
+        }
+    }
+
+    /// Whether the global hotkey is enabled
+    static var globalHotkeyEnabled: Bool {
+        get {
+            // Default to true if key hasn't been set
+            if defaults.object(forKey: Keys.globalHotkeyEnabled) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.globalHotkeyEnabled)
+        }
+        set { defaults.set(newValue, forKey: Keys.globalHotkeyEnabled) }
+    }
+
     // MARK: Private
 
     // MARK: - Keys
@@ -261,6 +292,8 @@ enum AppSettings {
         static let tokenShowResetTime = "tokenShowResetTime"
         static let moduleLayoutConfig = "moduleLayoutConfig"
         static let verboseMode = "verboseMode"
+        static let globalHotkey = "globalHotkey"
+        static let globalHotkeyEnabled = "globalHotkeyEnabled"
     }
 
     private static let defaults = UserDefaults.standard

@@ -72,6 +72,8 @@ struct NotchMenuView: View {
                             self.showLayoutSettings = true
                         }
 
+                        HotkeyPickerRow()
+
                         Divider()
                             .background(Color.white.opacity(0.08))
                             .padding(.vertical, 4)

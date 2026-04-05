@@ -22,6 +22,7 @@ enum NotchStatus: Equatable {
 enum NotchOpenReason {
     case click
     case hover
+    case hotkey
     case notification
     case boot
     case unknown
@@ -196,6 +197,14 @@ final class NotchViewModel {
     func notchUnpop() {
         guard self.status == .popping else { return }
         self.status = .closed
+    }
+
+    func toggleNotch() {
+        if self.status == .opened {
+            self.notchClose()
+        } else {
+            self.notchOpen(reason: .hotkey)
+        }
     }
 
     func toggleMenu() {

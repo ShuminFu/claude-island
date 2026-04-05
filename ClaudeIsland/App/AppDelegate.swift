@@ -44,6 +44,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // When running as XCTest host, skip full initialization to avoid
+        // terminating the process (ensureSingleInstance) or heavy side effects.
+        if Foundation.ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil {
+            return
+        }
+
         if !self.ensureSingleInstance() {
             NSApplication.shared.terminate(nil)
             return
@@ -59,6 +65,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         self.windowManager = WindowManager()
         _ = self.windowManager?.setupNotchWindow()
+
+        // Configure and start global hotkey to toggle the notch panel
+        GlobalHotkeyManager.shared.onToggle = { [weak self] in
+            self?.windowController?.viewModel.toggleNotch()
+        }
+        GlobalHotkeyManager.shared.start()
 
         self.screenObserver = ScreenObserver { [weak self] in
             self?.handleScreenChange()
@@ -87,6 +99,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Stop interrupt watchers
         InterruptWatcherManager.shared.stopAll()
+
+        // Stop global hotkey monitor
+        GlobalHotkeyManager.shared.stop()
 
         // Stop accessibility permission monitoring
         AccessibilityPermissionManager.shared.stopPeriodicMonitoring()

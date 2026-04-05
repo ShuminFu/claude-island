@@ -46,6 +46,17 @@ enum NotchContentType: Equatable {
     }
 }
 
+// MARK: - ChatScrollCommand
+
+enum ChatScrollCommand: Equatable {
+    case stepUp
+    case stepDown
+    case jumpTop
+    case jumpBottom
+    case nextUserMessage
+    case previousUserMessage
+}
+
 // MARK: - NotchViewModel
 
 /// State management for the dynamic island notch UI
@@ -91,6 +102,9 @@ final class NotchViewModel {
     /// When true, ChatView should focus its text input (enter "insert mode").
     /// Set by Tab key in keyboard monitor. ChatView observes and resets.
     var requestChatInputFocus = false
+
+    /// Signal for keyboard-driven chat scroll commands. ChatView observes and resets to nil.
+    var chatScrollCommand: ChatScrollCommand?
 
     // MARK: - Geometry
 
@@ -282,16 +296,18 @@ final class NotchViewModel {
     ///
     /// Spatial model (Apple "negative one screen"):
     ///   Menu ←── Instances List ──→ Chat
-    func handleKeyDown(keyCode: UInt16, sortedInstances: [SessionState]) -> Bool {
+    func handleKeyDown(keyCode: UInt16, modifiers: NSEvent.ModifierFlags = [], sortedInstances: [SessionState]) -> Bool {
         let keymap = NavigationKeymap.keymap(for: AppSettings.navigationStyle)
-        guard let action = keymap.action(for: keyCode) else { return false }
+        let action = keymap.action(for: keyCode)
 
         switch self.contentType {
         case .instances:
+            guard let action else { return false }
             return self.handleInstancesAction(action, sortedInstances: sortedInstances)
         case .chat:
-            return self.handleChatAction(action)
+            return self.handleChatAction(action, keyCode: keyCode, modifiers: modifiers)
         case .menu:
+            guard let action else { return false }
             return self.handleMenuAction(action)
         }
     }
@@ -332,14 +348,35 @@ final class NotchViewModel {
         }
     }
 
-    private func handleChatAction(_ action: NavigationAction) -> Bool {
-        switch action {
-        case .left, .close:
-            // Navigate left or back → return to instances
-            self.exitChat()
+    // swiftlint:disable:next cyclomatic_complexity
+    private func handleChatAction(_ action: NavigationAction?, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> Bool {
+        // Navigation actions (from keymap)
+        if let action {
+            switch action {
+            case .left, .close:
+                self.exitChat()
+                return true
+            case .up:
+                self.chatScrollCommand = .stepUp
+                return true
+            case .down:
+                self.chatScrollCommand = .stepDown
+                return true
+            default:
+                break
+            }
+        }
+
+        // Chat-specific keys (not in navigation keymap)
+        let hasShift = modifiers.contains(.shift)
+        switch keyCode {
+        case 5: // g key
+            self.chatScrollCommand = hasShift ? .jumpBottom : .jumpTop
+            return true
+        case 45: // n key
+            self.chatScrollCommand = hasShift ? .previousUserMessage : .nextUserMessage
             return true
         default:
-            // All other keys pass through to chat (text input, scrolling)
             return false
         }
     }

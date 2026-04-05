@@ -590,7 +590,7 @@ struct NotchView: View {
 
             // Normal mode: let ViewModel handle navigation
             let sorted = sm.instances.sortedByPriority()
-            if vm.handleKeyDown(keyCode: event.keyCode, sortedInstances: sorted) {
+            if vm.handleKeyDown(keyCode: event.keyCode, modifiers: event.modifierFlags, sortedInstances: sorted) {
                 return nil // Consume the event
             }
             return event

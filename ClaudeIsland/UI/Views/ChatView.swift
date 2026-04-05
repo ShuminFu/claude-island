@@ -216,6 +216,15 @@ struct ChatView: View {
     @State private var keyEventMonitor: Any?
     @FocusState private var isInputFocused: Bool
 
+    /// Scroll position fraction (0 = bottom/newest, 1 = top/oldest) for the mini scrollbar.
+    @State private var scrollFraction: CGFloat = 0
+    /// Visible fraction of content (determines scrollbar thumb height).
+    @State private var visibleFraction: CGFloat = 1
+    /// Auto-hide timer for the scrollbar after keyboard scrolling stops.
+    @State private var scrollbarHideTask: Task<Void, Never>?
+    /// Whether the mini scrollbar is currently visible.
+    @State private var isScrollbarVisible = false
+
     // MARK: - Header
 
     @State private var isHeaderHovered = false
@@ -371,6 +380,11 @@ struct ChatView: View {
                                 removal: .opacity,
                             ))
                     }
+
+                    // Invisible anchor at top (last due to flip)
+                    Color.clear
+                        .frame(height: 1)
+                        .id("top")
                 }
                 .padding(.top, 20)
                 .padding(.bottom, 20)
@@ -391,6 +405,22 @@ struct ChatView: View {
                     self.resumeAutoscroll()
                 }
             }
+            .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
+                let maxOffset = geometry.contentSize.height - geometry.containerSize.height
+                let fraction = maxOffset > 0
+                    ? min(1, max(0, geometry.contentOffset.y / maxOffset)) : 0
+                let visible = geometry.contentSize.height > 0
+                    ? min(1, geometry.containerSize.height / geometry.contentSize.height) : 1
+                return ScrollMetrics(fraction: fraction, visible: visible)
+            } action: { _, metrics in
+                // Only update when change exceeds threshold to avoid per-frame SwiftUI re-renders
+                if abs(metrics.fraction - self.scrollFraction) > 0.005 {
+                    self.scrollFraction = metrics.fraction
+                }
+                if abs(metrics.visible - self.visibleFraction) > 0.01 {
+                    self.visibleFraction = metrics.visible
+                }
+            }
             .onChange(of: self.shouldScrollToBottom) { _, shouldScroll in
                 if shouldScroll {
                     withAnimation(.easeOut(duration: 0.3)) {
@@ -400,6 +430,11 @@ struct ChatView: View {
                     self.shouldScrollToBottom = false
                     self.resumeAutoscroll()
                 }
+            }
+            .onChange(of: self.viewModel.chatScrollCommand) { _, command in
+                guard let command else { return }
+                self.viewModel.chatScrollCommand = nil
+                self.handleScrollCommand(command, proxy: proxy)
             }
             // New messages indicator overlay
             .overlay(alignment: .bottom) {
@@ -419,6 +454,15 @@ struct ChatView: View {
                 }
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: self.isAutoscrollPaused && self.newMessageCount > 0)
+            // Mini scrollbar overlay (right edge)
+            .overlay(alignment: .trailing) {
+                if self.isScrollbarVisible && self.visibleFraction < 1 {
+                    MiniScrollbar(fraction: self.scrollFraction, visibleFraction: self.visibleFraction)
+                        .animation(nil, value: self.scrollFraction)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: self.isScrollbarVisible)
         }
     }
 
@@ -544,6 +588,104 @@ struct ChatView: View {
         )
     }
 
+    // MARK: - Keyboard Scroll Commands
+
+    private func handleScrollCommand(_ command: ChatScrollCommand, proxy: ScrollViewProxy) {
+        self.showScrollbar()
+        switch command {
+        case .stepUp, .stepDown:
+            // Step scroll via NSScrollView (inverted view: directions are flipped)
+            guard let scrollView = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self),
+                  let documentView = scrollView.documentView
+            else { return }
+            let scrollAmount: CGFloat = 80
+            let clipView = scrollView.contentView
+            var origin = clipView.bounds.origin
+            origin.y += (command == .stepUp ? 1 : -1) * scrollAmount
+            origin.y = max(0, min(origin.y, documentView.frame.height - clipView.bounds.height))
+            clipView.setBoundsOrigin(origin)
+            scrollView.reflectScrolledClipView(clipView)
+
+        case .jumpBottom:
+            // Jump to newest messages: in inverted view, offset 0 = visual bottom.
+            // Use proxy first to force LazyVStack to load, then NSScrollView for exact position.
+            proxy.scrollTo("bottom")
+            if let sv = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self) {
+                sv.contentView.setBoundsOrigin(.zero)
+                sv.reflectScrolledClipView(sv.contentView)
+            }
+            self.resumeAutoscroll()
+
+        case .jumpTop:
+            // Jump to oldest messages: in inverted view, max offset = visual top.
+            // Use proxy to force LazyVStack to load all content, then pin to max offset.
+            // Two-pass: first scrollTo triggers lazy loading, second async pins after layout.
+            proxy.scrollTo("top")
+            self.pauseAutoscroll()
+            Task(name: "jump-top-pin") {
+                // Wait for LazyVStack to finish layout after proxy.scrollTo
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+                if let sv = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self),
+                   let doc = sv.documentView {
+                    let maxY = doc.frame.height - sv.contentView.bounds.height
+                    sv.contentView.setBoundsOrigin(NSPoint(x: 0, y: max(0, maxY)))
+                    sv.reflectScrolledClipView(sv.contentView)
+                }
+            }
+
+        case .nextUserMessage, .previousUserMessage:
+            self.jumpToUserMessage(direction: command == .nextUserMessage ? .next : .previous, proxy: proxy)
+        }
+    }
+
+    private enum JumpDirection {
+        case next, previous
+    }
+
+    /// Jump to the next or previous user message relative to current scroll position.
+    /// Uses the tracked visible message index for efficient navigation.
+    private func jumpToUserMessage(direction: JumpDirection, proxy: ScrollViewProxy) {
+        let userItems = self.history.enumerated().filter {
+            if case .user = $0.element.type { return true }
+            return false
+        }
+        guard !userItems.isEmpty else { return }
+
+        // Find current scroll position by checking NSScrollView offset
+        let currentFraction: CGFloat
+        if let scrollView = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self),
+           let documentView = scrollView.documentView {
+            let clipView = scrollView.contentView
+            let maxOffset = documentView.frame.height - clipView.bounds.height
+            // Inverted: higher offset = older messages (towards top)
+            currentFraction = maxOffset > 0 ? clipView.bounds.origin.y / maxOffset : 0
+        } else {
+            currentFraction = 0
+        }
+
+        // Estimate which history index we're near (0 = newest, count-1 = oldest)
+        // In inverted view: fraction 0 = newest, fraction 1 = oldest
+        let estimatedIndex = Int(currentFraction * CGFloat(self.history.count - 1))
+
+        let targetItem: (offset: Int, element: ChatHistoryItem)?
+        switch direction {
+        case .next:
+            // Next = newer = lower index in history array
+            targetItem = userItems.last(where: { $0.offset < estimatedIndex })
+        case .previous:
+            // Previous = older = higher index in history array
+            targetItem = userItems.first(where: { $0.offset > estimatedIndex })
+        }
+
+        if let target = targetItem {
+            withAnimation(.easeOut(duration: 0.3)) {
+                proxy.scrollTo(target.element.id, anchor: .center)
+            }
+            self.pauseAutoscroll()
+        }
+    }
+
     // MARK: - Autoscroll Management
 
     /// Pause autoscroll (user scrolled away from bottom)
@@ -557,6 +699,17 @@ struct ChatView: View {
         self.isAutoscrollPaused = false
         self.newMessageCount = 0
         self.previousHistoryCount = self.history.count
+    }
+
+    /// Show mini scrollbar and schedule auto-hide after 1.5s of inactivity
+    private func showScrollbar() {
+        self.isScrollbarVisible = true
+        self.scrollbarHideTask?.cancel()
+        self.scrollbarHideTask = Task(name: "scrollbar-hide") {
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            self.isScrollbarVisible = false
+        }
     }
 
     /// Install local event monitor for Cmd+V paste shortcut
@@ -1468,4 +1621,52 @@ struct NewMessagesIndicator: View {
     // MARK: Private
 
     @State private var isHovering = false
+}
+
+// MARK: - ScrollMetrics
+
+/// Lightweight value for tracking scroll position in the inverted chat view.
+private struct ScrollMetrics: Equatable {
+    var fraction: CGFloat
+    var visible: CGFloat
+}
+
+// MARK: - MiniScrollbar
+
+/// Thin scrollbar indicator shown on the right edge during keyboard scrolling.
+private struct MiniScrollbar: View {
+    let fraction: CGFloat
+    let visibleFraction: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            let trackHeight = geo.size.height
+            let thumbHeight = max(20, trackHeight * self.visibleFraction)
+            let maxOffset = trackHeight - thumbHeight
+            // Invert fraction: in the inverted ScrollView, fraction 0 = visual bottom,
+            // but the scrollbar thumb should be at the bottom when viewing newest messages.
+            let offset = maxOffset * (1 - self.fraction)
+
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color.white.opacity(0.3))
+                .frame(width: 3, height: thumbHeight)
+                .offset(y: offset)
+        }
+        .frame(width: 3)
+        .padding(.trailing, 2)
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - NSView+FindDescendant
+
+extension NSView {
+    /// Recursively find the first descendant view of the given type.
+    func findDescendant<T: NSView>(ofType _: T.Type) -> T? {
+        for child in self.subviews {
+            if let match = child as? T { return match }
+            if let match = child.findDescendant(ofType: T.self) { return match }
+        }
+        return nil
+    }
 }

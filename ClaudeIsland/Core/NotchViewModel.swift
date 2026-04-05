@@ -242,7 +242,8 @@ final class NotchViewModel {
         if case let .chat(current) = contentType, current.sessionID == session.sessionID {
             return
         }
-        self.resetKeyboardSelection()
+        // Preserve selectedInstanceID so we can restore highlight when returning to instances
+        self.isKeyboardNavigating = false
         self.contentType = .chat(session)
 
         // Mark session as read when user opens chat
@@ -253,10 +254,12 @@ final class NotchViewModel {
         }
     }
 
-    /// Go back to instances list and clear saved chat state
+    /// Go back to instances list and restore keyboard selection highlight
     func exitChat() {
         self.currentChatSession = nil
-        self.resetKeyboardSelection()
+        // Restore keyboard navigation highlight if we still have a selected instance
+        // (selectedInstanceID was preserved when entering chat)
+        self.isKeyboardNavigating = self.selectedInstanceID != nil
         self.contentType = .instances
     }
 

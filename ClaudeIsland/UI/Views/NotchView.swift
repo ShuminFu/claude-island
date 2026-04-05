@@ -63,6 +63,14 @@ struct NotchView: View {
             self.cachedClosedLayout = self.computeClosedLayout()
             self.handleProcessingChange()
             self.handleWaitingForInputChange(instances)
+
+            // Auto-clear unread if user is currently viewing that session's chat
+            if case let .chat(currentChat) = self.viewModel.contentType,
+               instances.first(where: { $0.sessionID == currentChat.sessionID })?.hasUnreadUpdate == true {
+                Task(name: "auto-mark-read") {
+                    await SessionStore.shared.process(.markAsRead(sessionID: currentChat.sessionID))
+                }
+            }
         }
         .onChange(of: self.accessibilityManager.shouldShowPermissionWarning) { _, shouldShow in
             self.cachedClosedLayout = self.computeClosedLayout()

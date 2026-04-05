@@ -92,7 +92,11 @@ final class ChatHistoryManager {
             let filteredItems = self.filterOutSubagentTools(session.chatItems)
             newHistories[session.sessionID] = filteredItems
             newAgentDescriptions[session.sessionID] = session.subagentState.agentDescriptions
-            self.loadedSessions.insert(session.sessionID)
+            // Only mark as loaded when chatItems are populated (from file sync or history load).
+            // Prevents ChatView from skipping loadFromFile when session exists but JSONL hasn't been parsed yet.
+            if !filteredItems.isEmpty {
+                self.loadedSessions.insert(session.sessionID)
+            }
         }
         self.histories = newHistories
         self.agentDescriptions = newAgentDescriptions

@@ -118,7 +118,10 @@ struct NotchView: View {
     @State private var previousWaitingForInputIDs: Set<String> = []
     @State private var waitingForInputTimestamps: [String: Date] = [:] // sessionID -> when it entered waitingForInput
     @State private var isVisible = false
-    @State private var isHovering = false
+    /// Hover state is driven by viewModel.isHovering (geometry-based global event monitors).
+    /// Do NOT use SwiftUI .onHover here — contentShape(Rectangle()) creates an invisible
+    /// trap zone that prevents the mouse from escaping the panel area at screen edges.
+    private var isHovering: Bool { self.viewModel.isHovering }
     @State private var isBouncing = false
     @State private var hideVisibilityTask: Task<Void, Never>?
     @State private var bounceTask: Task<Void, Never>?
@@ -319,12 +322,10 @@ struct NotchView: View {
             .animation(.smooth, value: self.accessibilityManager.shouldShowPermissionWarning)
             .animation(.spring(response: 0.3, dampingFraction: 0.5), value: self.isBouncing)
             .animation(.smooth, value: self.clawdAlwaysVisible)
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
-                    self.isHovering = hovering
-                }
-            }
+            // Hit area for tap gesture only — do NOT add .onHover here.
+            // Hover is tracked via viewModel.isHovering (global event monitors with
+            // geometry-based bounds checking) to avoid mouse-trapping at screen edges.
+            .contentShape(self.currentNotchShape)
             .onTapGesture {
                 if self.viewModel.status != .opened {
                     self.viewModel.notchOpen(reason: .click)

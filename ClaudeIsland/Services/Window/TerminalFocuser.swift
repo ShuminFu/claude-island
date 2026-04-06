@@ -97,18 +97,24 @@ struct TerminalFocuser: Sendable {
     ///   - projectName: The project name to include in the title
     func flashTabTitle(tty: String, projectName: String) async {
         let ttyPath = "/dev/\(tty)"
+        Self.logger.info("Flash tab title: tty=\(ttyPath), project=\(projectName)")
         guard let handle = FileHandle(forWritingAtPath: ttyPath) else {
-            Self.logger.debug("Cannot open TTY for tab flash: \(ttyPath)")
+            Self.logger.warning("Cannot open TTY for tab flash: \(ttyPath)")
             return
         }
         defer { handle.closeFile() }
 
         let flash = "\u{1b}]0;\u{1f449}\u{1f449}\u{1f449} Claude: \(projectName) \u{1f448}\u{1f448}\u{1f448}\u{07}"
-        let restore = "\u{1b}]0;\u{1f916} Claude: \(projectName)\u{07}"
+        let normal = "\u{1b}]0;\u{1f916} Claude: \(projectName)\u{07}"
 
-        handle.write(Data(flash.utf8))
-        try? await Task.sleep(for: .milliseconds(500))
-        handle.write(Data(restore.utf8))
+        // Flash 3 times: on-off-on-off-on-restore
+        for _ in 0 ..< 3 {
+            handle.write(Data(flash.utf8))
+            try? await Task.sleep(for: .milliseconds(600))
+            handle.write(Data(normal.utf8))
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        Self.logger.info("Flash tab title completed")
     }
 
     // MARK: Private

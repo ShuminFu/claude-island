@@ -99,9 +99,6 @@ actor SessionStore {
         case let .interruptDetected(sessionID):
             await self.processInterrupt(sessionID: sessionID)
 
-        case let .clearDetected(sessionID):
-            await self.processClearDetected(sessionID: sessionID)
-
         case let .markAsRead(sessionID):
             self.processMarkAsRead(sessionID: sessionID)
 
@@ -187,12 +184,6 @@ actor SessionStore {
             // Recheck cancellation after await
             guard !Task.isCancelled else { return }
 
-            if result.clearDetected {
-                await self.process(.clearDetected(sessionID: sessionID))
-                // Recheck cancellation after clear processing
-                guard !Task.isCancelled else { return }
-            }
-
             guard !result.newMessages.isEmpty || result.clearDetected else {
                 return
             }
@@ -200,11 +191,15 @@ actor SessionStore {
             // Revalidate session still exists before processing file update
             guard self.sessions[sessionID] != nil else { return }
 
+            // Clear detection is merged into the payload (single actor hop) to avoid
+            // a race condition where a separate .clearDetected event could be processed
+            // but the follow-up .fileUpdated never arrives (task cancelled between hops).
             let payload = FileUpdatePayload(
                 sessionID: sessionID,
                 cwd: cwd,
                 messages: result.newMessages,
                 isIncremental: !result.clearDetected,
+                clearDetected: result.clearDetected,
                 completedToolIDs: result.completedToolIDs,
                 toolResults: result.toolResults,
                 structuredResults: result.structuredResults,
@@ -653,38 +648,16 @@ actor SessionStore {
 
         session.conversationInfo = conversationInfo
 
-        // Handle /clear reconciliation - remove items that no longer exist in parser state
-        if session.needsClearReconciliation {
-            // Build set of valid IDs from the payload messages
-            var validIDs = Set<String>()
-            for message in payload.messages {
-                for (blockIndex, block) in message.content.enumerated() {
-                    switch block {
-                    case let .toolUse(tool):
-                        validIDs.insert(tool.id)
-                    case .text,
-                         .thinking,
-                         .interrupted:
-                        let itemID = "\(message.id)-\(block.typePrefix)-\(blockIndex)"
-                        validIDs.insert(itemID)
-                    }
-                }
-            }
-
-            // Filter chatItems to only keep valid items OR items that are very recent
-            // (within last 2 seconds - these are hook-created placeholders for post-clear tools)
+        // Handle /clear — reset chatItems atomically within this single event.
+        // Keeping only very recent items (within 2s) preserves hook-created tool placeholders
+        // that arrived after the clear but before this file update.
+        if payload.clearDetected {
             let cutoffTime = Date().addingTimeInterval(-2)
             let previousCount = session.chatItems.count
-            session.chatItems = session.chatItems.filter { item in
-                validIDs.contains(item.id) || item.timestamp > cutoffTime
-            }
-
-            // Also reset tool tracker
+            session.chatItems = session.chatItems.filter { $0.timestamp > cutoffTime }
             session.toolTracker = ToolTracker()
             session.subagentState = SubagentState()
-
-            session.needsClearReconciliation = false
-            Self.logger.debug("Clear reconciliation: kept \(session.chatItems.count) of \(previousCount) items")
+            Self.logger.debug("Clear: reset chatItems from \(previousCount) to \(session.chatItems.count)")
         }
 
         self.processMessages(
@@ -905,21 +878,6 @@ actor SessionStore {
         }
 
         self.sessions[sessionID] = session
-    }
-
-    // MARK: - Clear Processing
-
-    private func processClearDetected(sessionID: String) async {
-        guard var session = sessions[sessionID] else { return }
-
-        Self.logger.info("Processing /clear for session \(sessionID.prefix(8), privacy: .public)")
-
-        // Mark that a clear happened - the next fileUpdated will reconcile
-        // by removing items that no longer exist in the parser's state
-        session.needsClearReconciliation = true
-        self.sessions[sessionID] = session
-
-        Self.logger.info("/clear processed for session \(sessionID.prefix(8), privacy: .public) - marked for reconciliation")
     }
 
     // MARK: - Session End Processing

@@ -60,6 +60,7 @@ final class ChatHistoryManager {
             cwd: cwd,
             messages: messages,
             isIncremental: false, // Full sync
+            clearDetected: false,
             completedToolIDs: completedTools,
             toolResults: toolResults,
             structuredResults: structuredResults,

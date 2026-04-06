@@ -59,11 +59,6 @@ nonisolated enum SessionEvent: Sendable {
     /// A Task (subagent) tool has stopped
     case subagentStopped(sessionID: String, taskToolID: String)
 
-    // MARK: - Clear Events (from JSONL detection)
-
-    /// User issued /clear command - reset UI state while keeping session alive
-    case clearDetected(sessionID: String)
-
     // MARK: - Read/Unread Status
 
     /// Mark a session as read (user viewed it)
@@ -104,6 +99,10 @@ nonisolated struct FileUpdatePayload: Sendable {
     /// When true, messages contains only NEW messages since last update
     /// When false, messages contains ALL messages (used for initial load or after /clear)
     let isIncremental: Bool
+    /// When true, a /clear command was detected — chatItems should be reset before processing messages.
+    /// Merged into the payload (rather than a separate event) to avoid a race condition where
+    /// the clear flag and file update could be split across two actor hops.
+    let clearDetected: Bool
     let completedToolIDs: Set<String>
     let toolResults: [String: ConversationParser.ToolResult]
     let structuredResults: [String: ToolResultData]
@@ -225,7 +224,6 @@ nonisolated extension SessionEvent {
              let .permissionDenied(sessionID, _, _),
              let .permissionSocketFailed(sessionID, _),
              let .interruptDetected(sessionID),
-             let .clearDetected(sessionID),
              let .markAsRead(sessionID),
              let .sessionEnded(sessionID),
              let .loadHistory(sessionID, _),
@@ -260,8 +258,6 @@ nonisolated extension SessionEvent: CustomStringConvertible {
             "fileUpdated(session: \(payload.sessionID.prefix(8)), messages: \(payload.messages.count))"
         case let .interruptDetected(sessionID):
             "interruptDetected(session: \(sessionID.prefix(8)))"
-        case let .clearDetected(sessionID):
-            "clearDetected(session: \(sessionID.prefix(8)))"
         case let .markAsRead(sessionID):
             "markAsRead(session: \(sessionID.prefix(8)))"
         case let .sessionEnded(sessionID):

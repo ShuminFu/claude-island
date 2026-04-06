@@ -74,7 +74,7 @@ actor SessionStore {
     // MARK: - Event Processing
 
     /// Process any session event - the ONLY way to mutate state
-    func process(_ event: SessionEvent) async {
+    func process(_ event: SessionEvent) async { // swiftlint:disable:this cyclomatic_complexity
         Self.logger.debug("Processing: \(String(describing: event), privacy: .public)")
 
         // Record to audit trail
@@ -98,6 +98,9 @@ actor SessionStore {
 
         case let .interruptDetected(sessionID):
             await self.processInterrupt(sessionID: sessionID)
+
+        case let .rewindDetected(sessionID, cwd):
+            Self.logger.debug("Rewind detected for session \(sessionID, privacy: .public) in \(cwd, privacy: .public)")
 
         case let .markAsRead(sessionID):
             self.processMarkAsRead(sessionID: sessionID)
@@ -224,6 +227,9 @@ actor SessionStore {
     /// Pending file syncs (debounced)
     private var pendingSyncs: [String: Task<Void, Never>] = [:]
 
+    /// Active rewind watchers, keyed by sessionID
+    private var rewindWatchers: [String: RewindWatcher] = [:]
+
     /// Sync debounce interval (100ms)
     private let syncDebounce: Duration = .milliseconds(100)
 
@@ -307,19 +313,23 @@ actor SessionStore {
         let sessionID = event.sessionID
         var session = self.sessions[sessionID] ?? self.createSession(from: event)
 
-        session.pid = event.pid
-        if let pid = event.pid {
-            let tree = ProcessTreeBuilder.shared.buildTree()
-            session.isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
+        self.updateSessionMetadata(&session, from: event)
+
+        // Start rewind watcher for new sessions
+        if self.rewindWatchers[sessionID] == nil {
+            let watcher = RewindWatcher(sessionID: sessionID, cwd: event.cwd) { sid, cwd in
+                Task(name: "rewind-detected") {
+                    await SessionStore.shared.process(.rewindDetected(sessionID: sid, cwd: cwd))
+                }
+            }
+            Task(name: "rewind-watcher-start") { await watcher.start() }
+            self.rewindWatchers[sessionID] = watcher
         }
-        if let tty = event.tty {
-            session.tty = tty.replacingOccurrences(of: "/dev/", with: "")
-        }
-        session.lastActivity = Date()
 
         if event.status == "ended" {
             self.sessions.removeValue(forKey: sessionID)
             self.cancelPendingSync(sessionID: sessionID)
+            self.stopRewindWatcher(sessionID: sessionID)
             return
         }
 
@@ -365,6 +375,31 @@ actor SessionStore {
         }
     }
 
+    private func updateSessionMetadata(_ session: inout SessionState, from event: HookEvent) {
+        session.pid = event.pid
+        if let pid = event.pid {
+            let tree = ProcessTreeBuilder.shared.buildTree()
+            session.isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
+        }
+        if let tty = event.tty {
+            session.tty = tty.replacingOccurrences(of: "/dev/", with: "")
+        }
+        if let terminalTTY = event.terminalTTY {
+            session.terminalTTY = terminalTTY.replacingOccurrences(of: "/dev/", with: "")
+        }
+        // Update git info — branch can change during a session
+        if let gitBranch = event.gitBranch {
+            session.gitBranch = gitBranch
+        }
+        if session.gitRepoName == nil, let gitRepoName = event.gitRepoName {
+            session.gitRepoName = gitRepoName
+        }
+        if let gitIsWorktree = event.gitIsWorktree {
+            session.gitIsWorktree = gitIsWorktree
+        }
+        session.lastActivity = Date()
+    }
+
     private func createSession(from event: HookEvent) -> SessionState {
         SessionState(
             sessionID: event.sessionID,
@@ -372,7 +407,11 @@ actor SessionStore {
             projectName: URL(fileURLWithPath: event.cwd).lastPathComponent,
             pid: event.pid,
             tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
+            terminalTTY: event.terminalTTY?.replacingOccurrences(of: "/dev/", with: ""),
             isInTmux: false, // Will be updated
+            gitRepoName: event.gitRepoName,
+            gitBranch: event.gitBranch,
+            gitIsWorktree: event.gitIsWorktree ?? false,
             phase: .idle,
         )
     }
@@ -690,6 +729,64 @@ actor SessionStore {
         )
     }
 
+    // MARK: - Rewind Processing
+
+    private func processRewind(sessionID: String, cwd: String) async {
+        // Cancel any pending file sync to avoid race with stale incremental parse
+        self.cancelPendingSync(sessionID: sessionID)
+
+        // Phase 1: Async work — full re-parse from beginning
+        let result = await ConversationParser.shared.reparseAfterTruncation(
+            sessionID: sessionID,
+            cwd: cwd,
+        )
+        let conversationInfo = await ConversationParser.shared.parse(
+            sessionID: sessionID,
+            cwd: cwd,
+        )
+
+        // Phase 2: Sync state mutation — re-read session after await
+        guard var session = sessions[sessionID] else { return }
+
+        // Reset all chat state
+        session.chatItems = []
+        session.toolTracker = ToolTracker()
+        session.subagentState = SubagentState()
+        session.conversationInfo = conversationInfo
+
+        // Rebuild chatItems from re-parsed messages
+        let payload = FileUpdatePayload(
+            sessionID: sessionID,
+            cwd: cwd,
+            messages: result.allMessages,
+            isIncremental: false,
+            clearDetected: false,
+            completedToolIDs: result.completedToolIDs,
+            toolResults: result.toolResults,
+            structuredResults: result.structuredResults,
+        )
+        self.processMessages(from: payload, into: &session)
+        session.chatItems.sort { $0.timestamp < $1.timestamp }
+
+        self.populateSubagentToolsSync(
+            session: &session,
+            cwd: cwd,
+            structuredResults: result.structuredResults,
+        )
+
+        self.sessions[sessionID] = session
+
+        self.emitToolCompletionEvents(
+            sessionID: sessionID,
+            session: session,
+            completedToolIDs: result.completedToolIDs,
+            toolResults: result.toolResults,
+            structuredResults: result.structuredResults,
+        )
+
+        Self.logger.info("Rewind processed for \(sessionID.prefix(8), privacy: .public): rebuilt \(session.chatItems.count) items")
+    }
+
     /// Process messages from payload into session chat items
     private func processMessages(
         from payload: FileUpdatePayload,
@@ -885,6 +982,13 @@ actor SessionStore {
     private func processSessionEnd(sessionID: String) async {
         self.sessions.removeValue(forKey: sessionID)
         self.cancelPendingSync(sessionID: sessionID)
+        self.stopRewindWatcher(sessionID: sessionID)
+    }
+
+    private func stopRewindWatcher(sessionID: String) {
+        if let watcher = self.rewindWatchers.removeValue(forKey: sessionID) {
+            Task(name: "rewind-watcher-stop") { await watcher.stop() }
+        }
     }
 
     // MARK: - History Loading

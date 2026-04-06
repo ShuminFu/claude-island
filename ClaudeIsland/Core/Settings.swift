@@ -290,6 +290,19 @@ enum AppSettings {
         set { defaults.set(newValue.rawValue, forKey: Keys.navigationStyle) }
     }
 
+    // MARK: - Tab Title Flash
+
+    /// Whether to flash the terminal tab title when focusing the terminal
+    static var enableTabFlashOnFocus: Bool {
+        get {
+            if defaults.object(forKey: Keys.enableTabFlashOnFocus) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.enableTabFlashOnFocus)
+        }
+        set { defaults.set(newValue, forKey: Keys.enableTabFlashOnFocus) }
+    }
+
     // MARK: Private
 
     // MARK: - Keys
@@ -310,6 +323,7 @@ enum AppSettings {
         static let globalHotkey = "globalHotkey"
         static let globalHotkeyEnabled = "globalHotkeyEnabled"
         static let navigationStyle = "navigationStyle"
+        static let enableTabFlashOnFocus = "enableTabFlashOnFocus"
     }
 
     private static let defaults = UserDefaults.standard

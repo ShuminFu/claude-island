@@ -45,6 +45,11 @@ nonisolated enum SessionEvent: Sendable {
     /// User interrupted Claude (detected via JSONL)
     case interruptDetected(sessionID: String)
 
+    // MARK: - Rewind Events (from RewindWatcher)
+
+    /// JSONL file was truncated (user ran /rewind in CLI)
+    case rewindDetected(sessionID: String, cwd: String)
+
     // MARK: - Subagent Events (Task tool tracking)
 
     /// A Task (subagent) tool has started
@@ -224,6 +229,7 @@ nonisolated extension SessionEvent {
              let .permissionDenied(sessionID, _, _),
              let .permissionSocketFailed(sessionID, _),
              let .interruptDetected(sessionID),
+             let .rewindDetected(sessionID, _),
              let .markAsRead(sessionID),
              let .sessionEnded(sessionID),
              let .loadHistory(sessionID, _),
@@ -258,6 +264,8 @@ nonisolated extension SessionEvent: CustomStringConvertible {
             "fileUpdated(session: \(payload.sessionID.prefix(8)), messages: \(payload.messages.count))"
         case let .interruptDetected(sessionID):
             "interruptDetected(session: \(sessionID.prefix(8)))"
+        case let .rewindDetected(sessionID, _):
+            "rewindDetected(session: \(sessionID.prefix(8)))"
         case let .markAsRead(sessionID):
             "markAsRead(session: \(sessionID.prefix(8)))"
         case let .sessionEnded(sessionID):

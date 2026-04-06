@@ -48,14 +48,14 @@ struct NavigationKeymap: Sendable {
     }
 
     /// Build a keymap for the given navigation style
-    static func keymap(for style: NavigationStyle) -> NavigationKeymap {
+    static func keymap(for style: NavigationStyle) -> Self {
         switch style {
         case .arrows:
-            NavigationKeymap(mapping: Self.arrowBindings)
+            Self(mapping: Self.arrowBindings)
         case .vim:
-            NavigationKeymap(mapping: Self.arrowBindings.merging(Self.vimBindings) { _, vim in vim })
+            Self(mapping: Self.arrowBindings.merging(Self.vimBindings) { _, vim in vim })
         case .both:
-            NavigationKeymap(mapping: Self.arrowBindings.merging(Self.vimBindings) { arrow, _ in arrow })
+            Self(mapping: Self.arrowBindings.merging(Self.vimBindings) { arrow, _ in arrow })
         }
     }
 

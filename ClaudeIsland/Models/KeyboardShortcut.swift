@@ -14,7 +14,7 @@ struct GlobalKeyboardShortcut: Codable, Equatable, Sendable {
     // MARK: Internal
 
     /// Default shortcut: ⌥C (Option + C)
-    static let `default` = GlobalKeyboardShortcut(keyCode: 8, modifiers: NSEvent.ModifierFlags.option.rawValue)
+    static let `default` = Self(keyCode: 8, modifiers: NSEvent.ModifierFlags.option.rawValue)
 
     /// Hardware key code (UInt16 from NSEvent.keyCode)
     let keyCode: UInt16
@@ -38,9 +38,9 @@ struct GlobalKeyboardShortcut: Codable, Equatable, Sendable {
     }
 
     /// Create from an NSEvent (used during recording)
-    static func from(event: NSEvent) -> GlobalKeyboardShortcut {
+    static func from(event: NSEvent) -> Self {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue
-        return GlobalKeyboardShortcut(keyCode: event.keyCode, modifiers: modifiers)
+        return Self(keyCode: event.keyCode, modifiers: modifiers)
     }
 
     /// Check if an NSEvent matches this shortcut

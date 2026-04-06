@@ -26,6 +26,9 @@ __all__ = [
     "is_session_active",
     "main",
     "send_event",
+    "get_git_info",
+    "get_terminal_tty",
+    "update_tab_title",
     "validate_tty",
 ]
 
@@ -81,11 +84,15 @@ class SessionStateDict(TypedDict):
     tty_valid: bool
     session_active: bool
     status: str
+    terminal_tty: NotRequired[str | None]
     tool: NotRequired[str]
     tool_input: dict[str, str | int | bool | list[str] | None]  # Always included
     tool_use_id: NotRequired[str]
     notification_type: NotRequired[str]
     message: NotRequired[str]
+    git_repo_name: NotRequired[str | None]
+    git_branch: NotRequired[str | None]
+    git_is_worktree: NotRequired[bool]
 
 
 ToolInputType = dict[str, str | int | bool | list[str] | None]
@@ -110,8 +117,12 @@ class SessionState:
     tool: str | None = None
     tool_input: ToolInputType = field(default_factory=dict)
     tool_use_id: str | None = None
+    terminal_tty: str | None = None
     notification_type: str | None = None
     message: str | None = None
+    git_repo_name: str | None = None
+    git_branch: str | None = None
+    git_is_worktree: bool = False
 
     def to_dict(self, /) -> SessionStateDict:
         """Convert to dictionary for JSON serialization."""
@@ -127,6 +138,8 @@ class SessionState:
             "tool_input": self.tool_input,  # Required field - include in literal
         }
 
+        if self.terminal_tty is not None:
+            result["terminal_tty"] = self.terminal_tty
         if self.tool is not None:
             result["tool"] = self.tool
         if self.tool_use_id is not None:
@@ -135,6 +148,12 @@ class SessionState:
             result["notification_type"] = self.notification_type
         if self.message is not None:
             result["message"] = self.message
+        if self.git_repo_name is not None:
+            result["git_repo_name"] = self.git_repo_name
+        if self.git_branch is not None:
+            result["git_branch"] = self.git_branch
+        if self.git_is_worktree:
+            result["git_is_worktree"] = self.git_is_worktree
 
         return result
 
@@ -159,6 +178,127 @@ def validate_tty(tty: str | None, /) -> bool:
         )
     except OSError:
         return False
+
+
+def get_terminal_tty(tty: str | None, /) -> str | None:
+    """Get the actual terminal TTY, resolving through tmux if needed.
+
+    In tmux, the hook's TTY is the pane TTY (intercepted by tmux).
+    We need the client TTY (connected to the actual terminal) to
+    control the tab title via OSC escape sequences.
+
+    Args:
+        tty: The hook process's TTY path
+
+    Returns:
+        The terminal's real TTY path, or the original TTY if not in tmux
+    """
+    if not tty:
+        return None
+
+    # Check if we're inside tmux
+    if not os.environ.get("TMUX"):
+        return tty  # Not in tmux, use directly
+
+    # In tmux: find the client TTY for our session
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "#{client_tty}"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if client_tty := result.stdout.strip():
+            return client_tty
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    return tty  # Fallback
+
+
+def get_git_info(cwd: str, /) -> tuple[str | None, str | None, bool]:
+    """Get git repo name, branch, and worktree status for the given directory.
+
+    Returns:
+        Tuple of (repo_name, branch_name, is_worktree).
+        All fields are None/False if git is not installed or cwd is not a repo.
+    """
+    if not cwd:
+        return None, None, False
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            return None, None, False
+
+        lines = result.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None, None, False
+
+        repo_name = Path(lines[0]).name
+        branch = lines[1] if lines[1] != "HEAD" else None  # Detached HEAD
+    except subprocess.TimeoutExpired, OSError:
+        return None, None, False
+
+    # Detect worktree: git-common-dir != git-dir means we're in a worktree
+    is_worktree = False
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir", "--git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            cwd=cwd,
+        )
+        if result.returncode == 0:
+            wt_lines = result.stdout.strip().splitlines()
+            if len(wt_lines) == 2:
+                is_worktree = Path(wt_lines[0]).resolve() != Path(wt_lines[1]).resolve()
+    except subprocess.TimeoutExpired, OSError:
+        pass
+
+    return repo_name, branch, is_worktree
+
+
+def update_tab_title(status: str, cwd: str, tty: str | None, /) -> None:
+    """Update terminal tab title based on session status.
+
+    Uses OSC 0 escape sequence to set the tab title. Works with
+    Warp, iTerm2, Terminal.app, Ghostty, Kitty, WezTerm, and other
+    terminals that support OSC 0.
+
+    Args:
+        status: The session status string
+        cwd: The current working directory
+        tty: The terminal TTY path to write to
+    """
+    if not tty:
+        return
+
+    project = Path(cwd).name if cwd else "unknown"
+    title_map = {
+        "waiting_for_input": f"\u23f8 Claude: {project}",
+        "processing": f"\u26a1 Claude: {project}",
+        "running_tool": f"\u26a1 Claude: {project}",
+        "waiting_for_approval": f"\U0001f514 Claude: {project}",
+        "compacting": f"\U0001f4e6 Claude: {project}",
+        "ended": "",  # Clear title, restore terminal auto-title
+    }
+    title = title_map.get(status, f"\U0001f916 Claude: {project}")
+    try:
+        with open(tty, "w") as f:
+            f.write(f"\033]0;{title}\007")
+    except OSError:
+        pass
 
 
 def is_session_active(pid: int, tty: str | None, /) -> bool:
@@ -522,6 +662,16 @@ def main() -> None:
     # Resolve PID, TTY, build state
     claude_pid = get_claude_pid()
     tty = get_tty(claude_pid)
+
+    # Resolve terminal TTY (client TTY in tmux, same as tty otherwise)
+    terminal_tty = get_terminal_tty(tty)
+
+    # Update terminal tab title via OSC 0 escape sequence
+    update_tab_title(status, cwd, terminal_tty)
+
+    # Collect git info (repo name, branch, worktree status)
+    git_repo_name, git_branch, git_is_worktree = get_git_info(cwd)
+
     state = SessionState(
         session_id=session_id,
         cwd=cwd,
@@ -531,11 +681,15 @@ def main() -> None:
         tty_valid=validate_tty(tty),
         session_active=is_session_active(claude_pid, tty),
         status=status,
+        terminal_tty=terminal_tty,
         tool=extras.get("tool"),
         tool_input=_normalize_tool_input(extras.get("tool_input")),
         tool_use_id=extras.get("tool_use_id"),
         notification_type=extras.get("notification_type"),
         message=extras.get("message"),
+        git_repo_name=git_repo_name,
+        git_branch=git_branch,
+        git_is_worktree=git_is_worktree,
     )
 
     # Send to ClaudeIsland.app

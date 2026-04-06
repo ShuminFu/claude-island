@@ -49,7 +49,7 @@ nonisolated struct ConversationInfo: Equatable, Sendable {
 
 // MARK: - ConversationParser
 
-// swiftlint:disable type_body_length function_body_length cyclomatic_complexity
+// swiftlint:disable file_length type_body_length function_body_length cyclomatic_complexity
 actor ConversationParser {
     // MARK: Internal
 
@@ -254,6 +254,40 @@ actor ConversationParser {
     /// Reset incremental state for a session (call when reloading)
     func resetState(for sessionID: String) {
         self.incrementalState.removeValue(forKey: sessionID)
+    }
+
+    /// Re-parse a session's conversation from scratch after file truncation (e.g., /rewind).
+    /// Clears incremental state and re-reads the entire file from offset 0,
+    /// unlike the normal truncation path which skips existing content.
+    func reparseAfterTruncation(sessionID: String, cwd: String) async -> IncrementalParseResult {
+        self.incrementalState.removeValue(forKey: sessionID)
+
+        let sessionFile = Self.sessionFilePath(sessionID: sessionID, cwd: cwd)
+
+        guard Self.fileExists(path: sessionFile) else {
+            return IncrementalParseResult(
+                newMessages: [],
+                allMessages: [],
+                completedToolIDs: [],
+                toolResults: [:],
+                structuredResults: [:],
+                clearDetected: false,
+            )
+        }
+
+        var state = IncrementalParseState()
+        let parseResult = Self.readIncrementalContent(filePath: sessionFile, lastOffset: 0)
+        let allMessages = self.processIncrementalContent(parseResult, state: &state)
+        self.incrementalState[sessionID] = state
+
+        return IncrementalParseResult(
+            newMessages: allMessages,
+            allMessages: state.messages,
+            completedToolIDs: state.completedToolIDs,
+            toolResults: state.toolResults,
+            structuredResults: state.structuredResults,
+            clearDetected: false,
+        )
     }
 
     /// Check if a /clear command was detected during the last parse
@@ -806,4 +840,4 @@ actor ConversationParser {
     }
 }
 
-// swiftlint:enable type_body_length function_body_length cyclomatic_complexity
+// swiftlint:enable file_length type_body_length function_body_length cyclomatic_complexity

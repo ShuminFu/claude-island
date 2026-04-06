@@ -195,6 +195,11 @@ struct ChatView: View {
 
     // MARK: Private
 
+    private enum JumpDirection {
+        case next
+        case previous
+    }
+
     // MARK: - Keyboard Event Monitoring
 
     /// Logger for image paste operations
@@ -593,7 +598,8 @@ struct ChatView: View {
     private func handleScrollCommand(_ command: ChatScrollCommand, proxy: ScrollViewProxy) {
         self.showScrollbar()
         switch command {
-        case .stepUp, .stepDown:
+        case .stepUp,
+             .stepDown:
             // Step scroll via NSScrollView (inverted view: directions are flipped)
             guard let scrollView = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self),
                   let documentView = scrollView.documentView
@@ -634,13 +640,10 @@ struct ChatView: View {
                 }
             }
 
-        case .nextUserMessage, .previousUserMessage:
+        case .nextUserMessage,
+             .previousUserMessage:
             self.jumpToUserMessage(direction: command == .nextUserMessage ? .next : .previous, proxy: proxy)
         }
-    }
-
-    private enum JumpDirection {
-        case next, previous
     }
 
     /// Jump to the next or previous user message relative to current scroll position.
@@ -668,14 +671,13 @@ struct ChatView: View {
         // In inverted view: fraction 0 = newest, fraction 1 = oldest
         let estimatedIndex = Int(currentFraction * CGFloat(self.history.count - 1))
 
-        let targetItem: (offset: Int, element: ChatHistoryItem)?
-        switch direction {
+        let targetItem: (offset: Int, element: ChatHistoryItem)? = switch direction {
         case .next:
             // Next = newer = lower index in history array
-            targetItem = userItems.last(where: { $0.offset < estimatedIndex })
+            userItems.last { $0.offset < estimatedIndex }
         case .previous:
             // Previous = older = higher index in history array
-            targetItem = userItems.first(where: { $0.offset > estimatedIndex })
+            userItems.first { $0.offset > estimatedIndex }
         }
 
         if let target = targetItem {
@@ -803,11 +805,21 @@ struct ChatView: View {
 
     private func focusTerminal() {
         Task(name: "focus-terminal") {
+            var activated = false
             if let pid = session.pid {
-                let success = await TerminalFocuser.shared.focusTerminal(forClaudePID: pid)
-                if success { return }
+                activated = await TerminalFocuser.shared.focusTerminal(forClaudePID: pid)
             }
-            _ = await TerminalFocuser.shared.focusTerminal(forWorkingDirectory: self.session.cwd)
+            if !activated {
+                activated = await TerminalFocuser.shared.focusTerminal(forWorkingDirectory: self.session.cwd)
+            }
+
+            // Flash the tab title to help user locate the correct tab
+            if activated, AppSettings.enableTabFlashOnFocus {
+                let tty = self.session.terminalTTY ?? self.session.tty
+                if let tty {
+                    await TerminalFocuser.shared.flashTabTitle(tty: tty, projectName: self.session.projectName)
+                }
+            }
         }
     }
 

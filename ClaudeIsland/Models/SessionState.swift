@@ -23,7 +23,11 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
         projectName: String? = nil,
         pid: Int? = nil,
         tty: String? = nil,
+        terminalTTY: String? = nil,
         isInTmux: Bool = false,
+        gitRepoName: String? = nil,
+        gitBranch: String? = nil,
+        gitIsWorktree: Bool = false,
         phase: SessionPhase = .idle,
         chatItems: [ChatHistoryItem] = [],
         toolTracker: ToolTracker = ToolTracker(),
@@ -47,7 +51,11 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
         self.projectName = projectName ?? URL(fileURLWithPath: cwd).lastPathComponent
         self.pid = pid
         self.tty = tty
+        self.terminalTTY = terminalTTY
         self.isInTmux = isInTmux
+        self.gitRepoName = gitRepoName
+        self.gitBranch = gitBranch
+        self.gitIsWorktree = gitIsWorktree
         self.phase = phase
         self.chatItems = chatItems
         self.toolTracker = toolTracker
@@ -70,7 +78,19 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
 
     var pid: Int?
     var tty: String?
+    /// Terminal's real TTY path (client TTY in tmux, same as `tty` otherwise).
+    /// Used for tab title control via OSC escape sequences.
+    var terminalTTY: String?
     var isInTmux: Bool
+
+    // MARK: - Git Info
+
+    /// Git repository name (derived from repo root path). Nil if not in a git repo.
+    var gitRepoName: String?
+    /// Current git branch name. Nil if detached HEAD or not a git repo.
+    var gitBranch: String?
+    /// Whether this session is in a git worktree (not the main working tree).
+    var gitIsWorktree: Bool
 
     // MARK: - State Machine
 
@@ -113,6 +133,11 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
     }
 
     // MARK: - Derived Properties
+
+    /// Display-friendly project label: prefers git repo name, falls back to folder name
+    var projectLabel: String {
+        self.gitRepoName ?? self.projectName
+    }
 
     /// Whether this session needs user attention
     var needsAttention: Bool {

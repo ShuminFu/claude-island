@@ -53,11 +53,15 @@ nonisolated struct HookEvent: Sendable {
         status: String,
         pid: Int?,
         tty: String?,
+        terminalTTY: String?,
         tool: String?,
         toolInput: [String: JSONValue]?,
         toolUseID: String?,
         notificationType: String?,
-        message: String?
+        message: String?,
+        gitRepoName: String? = nil,
+        gitBranch: String? = nil,
+        gitIsWorktree: Bool? = nil
     ) {
         self.sessionID = sessionID
         self.cwd = cwd
@@ -65,11 +69,15 @@ nonisolated struct HookEvent: Sendable {
         self.status = status
         self.pid = pid
         self.tty = tty
+        self.terminalTTY = terminalTTY
         self.tool = tool
         self.toolInput = toolInput
         self.toolUseID = toolUseID
         self.notificationType = notificationType
         self.message = message
+        self.gitRepoName = gitRepoName
+        self.gitBranch = gitBranch
+        self.gitIsWorktree = gitIsWorktree
     }
 
     // MARK: Internal
@@ -77,10 +85,14 @@ nonisolated struct HookEvent: Sendable {
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
         case cwd, event, status, pid, tty, tool
+        case terminalTTY = "terminal_tty"
         case toolInput = "tool_input"
         case toolUseID = "tool_use_id"
         case notificationType = "notification_type"
         case message
+        case gitRepoName = "git_repo_name"
+        case gitBranch = "git_branch"
+        case gitIsWorktree = "git_is_worktree"
     }
 
     let sessionID: String
@@ -89,11 +101,15 @@ nonisolated struct HookEvent: Sendable {
     let status: String
     let pid: Int?
     let tty: String?
+    let terminalTTY: String?
     let tool: String?
     let toolInput: [String: JSONValue]?
     let toolUseID: String?
     let notificationType: String?
     let message: String?
+    let gitRepoName: String?
+    let gitBranch: String?
+    let gitIsWorktree: Bool?
 
     nonisolated var sessionPhase: SessionPhase {
         if event == "PreCompact" {
@@ -152,11 +168,15 @@ nonisolated extension HookEvent: Codable {
         status = try container.decode(String.self, forKey: .status)
         pid = try container.decodeIfPresent(Int.self, forKey: .pid)
         tty = try container.decodeIfPresent(String.self, forKey: .tty)
+        terminalTTY = try container.decodeIfPresent(String.self, forKey: .terminalTTY)
         tool = try container.decodeIfPresent(String.self, forKey: .tool)
         toolInput = try container.decodeIfPresent([String: JSONValue].self, forKey: .toolInput)
         toolUseID = try container.decodeIfPresent(String.self, forKey: .toolUseID)
         notificationType = try container.decodeIfPresent(String.self, forKey: .notificationType)
         message = try container.decodeIfPresent(String.self, forKey: .message)
+        gitRepoName = try container.decodeIfPresent(String.self, forKey: .gitRepoName)
+        gitBranch = try container.decodeIfPresent(String.self, forKey: .gitBranch)
+        gitIsWorktree = try container.decodeIfPresent(Bool.self, forKey: .gitIsWorktree)
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -167,11 +187,15 @@ nonisolated extension HookEvent: Codable {
         try container.encode(status, forKey: .status)
         try container.encodeIfPresent(pid, forKey: .pid)
         try container.encodeIfPresent(tty, forKey: .tty)
+        try container.encodeIfPresent(terminalTTY, forKey: .terminalTTY)
         try container.encodeIfPresent(tool, forKey: .tool)
         try container.encodeIfPresent(toolInput, forKey: .toolInput)
         try container.encodeIfPresent(toolUseID, forKey: .toolUseID)
         try container.encodeIfPresent(notificationType, forKey: .notificationType)
         try container.encodeIfPresent(message, forKey: .message)
+        try container.encodeIfPresent(gitRepoName, forKey: .gitRepoName)
+        try container.encodeIfPresent(gitBranch, forKey: .gitBranch)
+        try container.encodeIfPresent(gitIsWorktree, forKey: .gitIsWorktree)
     }
 }
 
@@ -758,11 +782,15 @@ final class HookSocketServer: @unchecked Sendable { // swiftlint:disable:this ty
             status: event.status,
             pid: event.pid,
             tty: event.tty,
+            terminalTTY: event.terminalTTY,
             tool: event.tool,
             toolInput: event.toolInput,
             toolUseID: toolUseID,
             notificationType: event.notificationType,
-            message: event.message
+            message: event.message,
+            gitRepoName: event.gitRepoName,
+            gitBranch: event.gitBranch,
+            gitIsWorktree: event.gitIsWorktree
         )
     }
 

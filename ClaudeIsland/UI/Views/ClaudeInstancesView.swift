@@ -234,6 +234,31 @@ struct InstanceRow: View {
                                 .lineLimit(1)
                         }
 
+                        if let repoName = self.session.gitRepoName {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.triangle.branch")
+                                    .font(.system(size: 8))
+                                if let branch = self.session.gitBranch {
+                                    Text("\(repoName) / \(branch)")
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .lineLimit(1)
+                                } else {
+                                    Text(repoName)
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .lineLimit(1)
+                                }
+                                if self.session.gitIsWorktree {
+                                    Image(systemName: "square.on.square")
+                                        .font(.system(size: 7))
+                                }
+                            }
+                            .foregroundColor(.white.opacity(0.4))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(0.08))
+                            .clipShape(Capsule())
+                        }
+
                         if let usage = self.session.usage {
                             Text(usage.formattedTotal)
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -327,23 +352,18 @@ struct InstanceRow: View {
                 Spacer(minLength: 0)
 
                 if self.isWaitingForApproval && self.isInteractiveTool {
-                    HStack(spacing: 8) {
-                        IconButton(icon: "bubble.left") { self.onChat() }
-                        if self.session.pid != nil {
-                            TerminalButton(isEnabled: true) { self.onFocus() }
-                        }
+                    if self.session.pid != nil {
+                        TerminalButton(isEnabled: true) { self.onFocus() }
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
                     }
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 } else if self.isWaitingForApproval {
                     InlineApprovalButtons(
-                        onChat: self.onChat,
                         onApprove: self.onApprove,
                         onReject: self.onReject,
                     )
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 } else {
                     HStack(spacing: 8) {
-                        IconButton(icon: "bubble.left") { self.onChat() }
                         if self.session.pid != nil {
                             IconButton(icon: "terminal") { self.onFocus() }
                         }
@@ -415,19 +435,11 @@ struct InstanceRow: View {
 struct InlineApprovalButtons: View {
     // MARK: Internal
 
-    let onChat: () -> Void
     let onApprove: () -> Void
     let onReject: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
-            // Chat button
-            IconButton(icon: "bubble.left") {
-                self.onChat()
-            }
-            .opacity(self.showChatButton ? 1 : 0)
-            .scaleEffect(self.showChatButton ? 1 : 0.8)
-
             Button {
                 self.onReject()
             } label: {
@@ -460,12 +472,9 @@ struct InlineApprovalButtons: View {
         }
         .onAppear {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.0)) {
-                self.showChatButton = true
-            }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.05)) {
                 self.showDenyButton = true
             }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.1)) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.05)) {
                 self.showAllowButton = true
             }
         }
@@ -473,7 +482,6 @@ struct InlineApprovalButtons: View {
 
     // MARK: Private
 
-    @State private var showChatButton = false
     @State private var showDenyButton = false
     @State private var showAllowButton = false
 }

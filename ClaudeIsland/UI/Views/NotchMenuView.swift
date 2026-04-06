@@ -139,7 +139,7 @@ struct NotchMenuView: View {
                         AccessibilityRow(accessibilityManager: self.accessibilityManager)
 
                         MenuToggleRow(
-                            icon: "text.line.first.and.arrowforward",
+                            icon: "text.alignleft",
                             label: "Verbose Mode",
                             isOn: self.verboseMode,
                         ) {

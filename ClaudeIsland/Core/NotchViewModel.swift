@@ -62,7 +62,7 @@ enum ChatScrollCommand: Equatable {
 /// State management for the dynamic island notch UI
 /// Uses @Observable macro for efficient property-level change tracking (macOS 14+)
 @Observable
-final class NotchViewModel {
+final class NotchViewModel { // swiftlint:disable:this type_body_length
     // MARK: Lifecycle
 
     // MARK: - Initialization
@@ -277,6 +277,19 @@ final class NotchViewModel {
         self.contentType = .instances
     }
 
+    /// Focus the terminal for the currently open chat session and close the notch
+    private func focusTerminalForCurrentChat() {
+        guard case let .chat(session) = contentType else { return }
+        self.notchClose()
+        Task(name: "focus-terminal-from-chat") {
+            if let pid = session.pid {
+                let success = await TerminalFocuser.shared.focusTerminal(forClaudePID: pid)
+                if success { return }
+            }
+            _ = await TerminalFocuser.shared.focusTerminal(forWorkingDirectory: session.cwd)
+        }
+    }
+
     /// Perform boot animation: expand briefly then collapse
     func performBootAnimation() {
         self.notchOpen(reason: .boot)
@@ -348,7 +361,6 @@ final class NotchViewModel {
         }
     }
 
-    // swiftlint:disable:next cyclomatic_complexity
     private func handleChatAction(_ action: NavigationAction?, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> Bool {
         // Navigation actions (from keymap)
         if let action {
@@ -356,14 +368,15 @@ final class NotchViewModel {
             case .left, .close:
                 self.exitChat()
                 return true
+            case .right, .confirm:
+                self.focusTerminalForCurrentChat()
+                return true
             case .up:
                 self.chatScrollCommand = .stepUp
                 return true
             case .down:
                 self.chatScrollCommand = .stepDown
                 return true
-            default:
-                break
             }
         }
 

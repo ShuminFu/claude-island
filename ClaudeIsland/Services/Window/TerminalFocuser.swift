@@ -87,6 +87,30 @@ struct TerminalFocuser: Sendable {
         }
     }
 
+    /// Flash the terminal tab title to draw the user's attention.
+    ///
+    /// Writes OSC 0 escape sequences to the TTY to temporarily change the tab title
+    /// to a visually distinct "pointing" pattern, then restores the normal title.
+    ///
+    /// - Parameters:
+    ///   - tty: The TTY name without `/dev/` prefix (e.g., "ttys032")
+    ///   - projectName: The project name to include in the title
+    func flashTabTitle(tty: String, projectName: String) async {
+        let ttyPath = "/dev/\(tty)"
+        guard let handle = FileHandle(forWritingAtPath: ttyPath) else {
+            Self.logger.debug("Cannot open TTY for tab flash: \(ttyPath)")
+            return
+        }
+        defer { handle.closeFile() }
+
+        let flash = "\u{1b}]0;\u{1f449}\u{1f449}\u{1f449} Claude: \(projectName) \u{1f448}\u{1f448}\u{1f448}\u{07}"
+        let restore = "\u{1b}]0;\u{1f916} Claude: \(projectName)\u{07}"
+
+        handle.write(Data(flash.utf8))
+        try? await Task.sleep(for: .milliseconds(500))
+        handle.write(Data(restore.utf8))
+    }
+
     // MARK: Private
 
     /// Logger for terminal focus operations

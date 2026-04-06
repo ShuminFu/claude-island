@@ -118,10 +118,12 @@ struct NotchView: View {
     @State private var previousWaitingForInputIDs: Set<String> = []
     @State private var waitingForInputTimestamps: [String: Date] = [:] // sessionID -> when it entered waitingForInput
     @State private var isVisible = false
-    /// Hover state is driven by viewModel.isHovering (geometry-based global event monitors).
-    /// Do NOT use SwiftUI .onHover here — contentShape(Rectangle()) creates an invisible
-    /// trap zone that prevents the mouse from escaping the panel area at screen edges.
-    private var isHovering: Bool { self.viewModel.isHovering }
+    /// Hover state driven by viewModel.isHovering (geometry-based global event monitors).
+    /// Only read when closed — when opened the shadow is always visible, so we avoid
+    /// creating an @Observable dependency that causes needless re-renders during animations.
+    private var showHoverShadow: Bool {
+        self.viewModel.status == .opened || self.viewModel.isHovering
+    }
     @State private var isBouncing = false
     @State private var hideVisibilityTask: Task<Void, Never>?
     @State private var bounceTask: Task<Void, Never>?
@@ -309,7 +311,7 @@ struct NotchView: View {
                     .padding(.horizontal, self.topCornerRadius)
             }
             .shadow(
-                color: (self.viewModel.status == .opened || self.isHovering) ? .black.opacity(0.7) : .clear,
+                color: self.showHoverShadow ? .black.opacity(0.7) : .clear,
                 radius: 6,
             )
             .frame(width: self.currentPanelWidth, alignment: .top)

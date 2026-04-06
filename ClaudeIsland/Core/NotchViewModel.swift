@@ -447,6 +447,8 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
 
     /// Task for hover delay before opening notch
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
+    /// Task for debounced hover-exit (prevents oscillation at boundaries)
+    @ObservationIgnored private var hoverExitTask: Task<Void, Never>?
     /// Task for boot animation auto-close
     @ObservationIgnored private var bootAnimationTask: Task<Void, Never>?
     /// Task for reposting mouse clicks to windows behind us
@@ -523,21 +525,34 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
 
         let newHovering = inNotch || inOpened
 
-        // Only update if changed to prevent unnecessary re-renders
-        guard newHovering != self.isHovering else { return }
+        if newHovering {
+            // Immediately enter hover — cancel any pending exit debounce
+            self.hoverExitTask?.cancel()
+            self.hoverExitTask = nil
 
-        self.isHovering = newHovering
+            guard !self.isHovering else { return }
+            self.isHovering = true
 
-        // Cancel any pending hover task
-        self.hoverTask?.cancel()
-        self.hoverTask = nil
-
-        // Start hover timer to auto-expand after 1 second
-        if self.isHovering && (self.status == .closed || self.status == .popping) {
-            self.hoverTask = Task(name: "hover-expand") {
-                try? await Task.sleep(for: .seconds(1.0))
-                guard !Task.isCancelled, self.isHovering else { return }
-                self.notchOpen(reason: .hover)
+            // Start hover timer to auto-expand after 1 second
+            self.hoverTask?.cancel()
+            if self.status == .closed || self.status == .popping {
+                self.hoverTask = Task(name: "hover-expand") {
+                    try? await Task.sleep(for: .seconds(1.0))
+                    guard !Task.isCancelled, self.isHovering else { return }
+                    self.notchOpen(reason: .hover)
+                }
+            }
+        } else {
+            // Debounce hover exit to prevent oscillation at boundaries.
+            // When opened, also prevents rapid re-renders during the expand animation.
+            guard self.isHovering, self.hoverExitTask == nil else { return }
+            self.hoverTask?.cancel()
+            self.hoverTask = nil
+            self.hoverExitTask = Task(name: "hover-exit-debounce") {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                self.isHovering = false
+                self.hoverExitTask = nil
             }
         }
     }

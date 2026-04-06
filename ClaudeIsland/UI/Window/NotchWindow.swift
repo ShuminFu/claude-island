@@ -54,10 +54,9 @@ class NotchPanel: NSPanel {
         // Enable tooltips even when app is inactive (needed for panel windows)
         allowsToolTipsWhenApplicationIsInactive = true
 
-        // Mouse events are always accepted. Per-pixel transparency (isOpaque = false
-        // + backgroundColor = .clear) ensures clicks on transparent areas pass through
-        // to the menu bar / windows behind. sendEvent handles edge cases via repost.
-        ignoresMouseEvents = false
+        // Start ignoring mouse events — the notch begins closed.
+        // NotchWindowController enables mouse events when the panel opens.
+        ignoresMouseEvents = true
 
         isReleasedWhenClosed = true
         acceptsMouseMovedEvents = false
@@ -65,8 +64,15 @@ class NotchPanel: NSPanel {
 
     // MARK: Internal
 
+    /// Whether the panel's content is actively shown (opened state).
+    /// When false, ignoresMouseEvents should stay true so the transparent window
+    /// doesn't interfere with mouse tracking at the .mainMenu+3 level.
+    var isContentActive = false
+
     override var canBecomeKey: Bool {
-        true
+        // Only accept key status when content is active — prevents the panel from
+        // capturing keyboard/mouse focus when closed (window still covers screen top)
+        self.isContentActive
     }
 
     override var canBecomeMain: Bool {
@@ -75,23 +81,28 @@ class NotchPanel: NSPanel {
 
     // MARK: - Click-through for areas outside the panel content
 
+    /// Event types that should pass through transparent areas to windows behind.
+    private static let passthroughMouseTypes: Set<NSEvent.EventType> = [
+        .leftMouseDown, .leftMouseUp,
+        .rightMouseDown, .rightMouseUp,
+        .otherMouseDown, .otherMouseUp,
+        .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+    ]
+
+    /// Track whether we're in a passthrough window to avoid overlapping asyncAfter timers.
+    private var passthroughActive = false
+
     override func sendEvent(_ event: NSEvent) {
-        // For mouse click events, check if we should pass through
-        if event.type == .leftMouseDown || event.type == .leftMouseUp ||
-            event.type == .rightMouseDown || event.type == .rightMouseUp {
+        // Mouse click, drag, and button events — pass through transparent areas
+        if Self.passthroughMouseTypes.contains(event.type) {
             let locationInWindow = event.locationInWindow
 
             if let contentView,
                contentView.hitTest(locationInWindow) == nil {
                 // No view wants this event — pass it through to windows behind.
-                // Temporarily ignore mouse events so the reposted CGEvent reaches
-                // the window behind us, then re-enable so we keep intercepting.
                 let screenLocation = convertPoint(toScreen: locationInWindow)
-                ignoresMouseEvents = true
                 self.repostMouseEvent(event, at: screenLocation)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                    self?.ignoresMouseEvents = false
-                }
+                self.enablePassthroughBriefly()
                 return
             }
         }
@@ -103,16 +114,28 @@ class NotchPanel: NSPanel {
 
             if let contentView,
                contentView.hitTest(locationInWindow) == nil {
-                ignoresMouseEvents = true
                 self.repostScrollEvent(event)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                    self?.ignoresMouseEvents = false
-                }
+                self.enablePassthroughBriefly()
                 return
             }
         }
 
         super.sendEvent(event)
+    }
+
+    /// Temporarily set ignoresMouseEvents so the reposted CGEvent reaches windows behind.
+    /// Guards against overlapping timers from rapid successive events.
+    private func enablePassthroughBriefly() {
+        guard !self.passthroughActive else { return }
+        self.passthroughActive = true
+        self.ignoresMouseEvents = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            // Only restore mouse events if the panel content is still active.
+            // If the panel closed during the passthrough window, keep ignoring.
+            self.ignoresMouseEvents = !self.isContentActive
+            self.passthroughActive = false
+        }
     }
 
     // MARK: Private
@@ -143,15 +166,19 @@ class NotchPanel: NSPanel {
         let cgPoint = CGPoint(x: screenLocation.x, y: screenHeight - screenLocation.y)
 
         let mouseType: CGEventType
+        let mouseButton: CGMouseButton
         switch event.type {
-        case .leftMouseDown: mouseType = .leftMouseDown
-        case .leftMouseUp: mouseType = .leftMouseUp
-        case .rightMouseDown: mouseType = .rightMouseDown
-        case .rightMouseUp: mouseType = .rightMouseUp
+        case .leftMouseDown: mouseType = .leftMouseDown; mouseButton = .left
+        case .leftMouseUp: mouseType = .leftMouseUp; mouseButton = .left
+        case .leftMouseDragged: mouseType = .leftMouseDragged; mouseButton = .left
+        case .rightMouseDown: mouseType = .rightMouseDown; mouseButton = .right
+        case .rightMouseUp: mouseType = .rightMouseUp; mouseButton = .right
+        case .rightMouseDragged: mouseType = .rightMouseDragged; mouseButton = .right
+        case .otherMouseDown: mouseType = .otherMouseDown; mouseButton = .center
+        case .otherMouseUp: mouseType = .otherMouseUp; mouseButton = .center
+        case .otherMouseDragged: mouseType = .otherMouseDragged; mouseButton = .center
         default: return
         }
-
-        let mouseButton: CGMouseButton = event.type == .rightMouseDown || event.type == .rightMouseUp ? .right : .left
 
         if let cgEvent = CGEvent(
             mouseEventSource: nil,
@@ -159,6 +186,8 @@ class NotchPanel: NSPanel {
             mouseCursorPosition: cgPoint,
             mouseButton: mouseButton,
         ) {
+            cgEvent.setIntegerValueField(.mouseEventClickState, value: Int64(event.clickCount))
+            cgEvent.flags = CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue))
             cgEvent.post(tap: .cghidEventTap)
         }
     }

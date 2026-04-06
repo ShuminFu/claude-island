@@ -60,34 +60,43 @@ class NotchWindowController: NSWindowController {
 
         notchWindow.setFrame(windowFrame, display: true)
 
-        // Mouse events are always enabled. The window has backgroundColor = .clear
-        // and isOpaque = false, so macOS per-pixel transparency handles click routing:
-        // - Clicks on transparent areas pass through to menu bar / windows behind
-        // - Clicks on the pill (non-transparent SwiftUI content) are delivered here
-        // For edge cases where non-zero alpha pixels exist outside the hitTestRect,
-        // NotchPanel.sendEvent temporarily ignores + reposts so the click passes through.
-        notchWindow.ignoresMouseEvents = false
+        // Start ignoring mouse events — the notch begins closed.
+        // Global event monitors handle hover detection and click-to-open.
+        // When the notch opens, the status stream handler enables mouse events
+        // so interactive content (buttons, scroll views) works.
+        notchWindow.ignoresMouseEvents = true
 
         let statusStream = self.viewModel.makeStatusStream()
         self.statusTask = Task(name: "notch-status-stream") { @MainActor [weak notchWindow, weak viewModel] in
             for await status in statusStream {
+                guard let panel = notchWindow else { continue }
                 switch status {
                 case .opened:
-                    // Ensure mouse events are enabled (safety reset after any repost)
-                    notchWindow?.ignoresMouseEvents = false
-                    // Don't steal focus when opened by notification (task finished)
-                    if viewModel?.openReason != .notification {
-                        if viewModel?.openReason == .hotkey {
-                            // Force activation for hotkey opens so local keyboard
-                            // event monitor receives subsequent key events
-                            NSApp.activate()
-                        }
-                        notchWindow?.makeKey()
+                    // Panel needs to receive mouse events when opened for interactive content
+                    panel.isContentActive = true
+                    panel.ignoresMouseEvents = false
+                    // Don't steal focus when opened by notification or hover.
+                    // makeKey() on a .mainMenu+3 panel can trap the mouse cursor
+                    // because macOS routes all events in the window frame to the key window.
+                    let reason = viewModel?.openReason
+                    if reason == .hotkey {
+                        // Force activation for hotkey opens so local keyboard
+                        // event monitor receives subsequent key events
+                        NSApp.activate()
+                        panel.makeKey()
+                    } else if reason == .click {
+                        panel.makeKey()
                     }
+                    // hover / notification opens: no makeKey — user can still click
+                    // the panel to give it key status if they need keyboard interaction
                 case .closed,
                      .popping:
-                    // Ensure mouse events are enabled (safety reset after any repost)
-                    notchWindow?.ignoresMouseEvents = false
+                    // When closed, ignore mouse events so the transparent window doesn't
+                    // interfere with mouse tracking. Global event monitors handle hover
+                    // detection and click-to-open independently.
+                    panel.isContentActive = false
+                    panel.ignoresMouseEvents = true
+                    panel.resignKey()
                 }
             }
         }

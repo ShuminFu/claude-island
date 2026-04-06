@@ -38,8 +38,10 @@ This is a fork of [claude-island](https://github.com/engels74/claude-island) by 
 Key improvements in this fork:
 
 - **Chat history** — Full conversation history with markdown rendering, auto-load on app restart
-- **Smart session list** — Intelligent summaries and system message filtering
-- **Bug fixes** — Fixed overlay window intercepting mouse events (double-click/right-click/drag)
+- **Smart session list** — Intelligent summaries, system message filtering, unread markers on hover/select
+- **Keyboard navigation** — Shortcut hints on approval buttons, keyboard scrolling in session details, quick approve/deny via hotkeys
+- **Terminal integration** — Tab flash prompts for all terminal jump entries, Git info display
+- **Bug fixes** — Fixed overlay window intercepting mouse events, panel mouse trapping, `/clear` blank session, and more
 
 ## Requirements
 

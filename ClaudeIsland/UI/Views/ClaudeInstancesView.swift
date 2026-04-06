@@ -160,6 +160,20 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
             self.isHovered = hovering
             if hovering {
                 self.onHoverStart?()
+                // Mark as read when mouse hovers over the row
+                if self.session.hasUnreadUpdate {
+                    Task(name: "hover-mark-read") {
+                        await SessionStore.shared.process(.markAsRead(sessionID: self.session.sessionID))
+                    }
+                }
+            }
+        }
+        .onChange(of: self.isSelected) { _, selected in
+            // Mark as read when keyboard navigation selects this row
+            if selected, self.session.hasUnreadUpdate {
+                Task(name: "select-mark-read") {
+                    await SessionStore.shared.process(.markAsRead(sessionID: self.session.sessionID))
+                }
             }
         }
         .onRightClick {

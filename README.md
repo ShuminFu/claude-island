@@ -1,11 +1,11 @@
 <div align="center">
   <img src="docs/logo.svg" alt="Logo" width="256" height="256">
   <p>
-    <a href="https://github.com/engels74/claude-island/releases/latest" target="_blank" rel="noopener noreferrer">
-      <img src="https://img.shields.io/github/v/release/engels74/claude-island?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" />
+    <a href="https://github.com/ShuminFu/claude-island/releases/latest" target="_blank" rel="noopener noreferrer">
+      <img src="https://img.shields.io/github/v/release/ShuminFu/claude-island?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" />
     </a>
     <a href="#" target="_blank" rel="noopener noreferrer">
-      <img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/engels74/claude-island/total?style=rounded&color=white&labelColor=000000">
+      <img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/ShuminFu/claude-island/total?style=rounded&color=white&labelColor=000000">
     </a>
     <a href="https://opensource.org/licenses/Apache-2.0" target="_blank" rel="noopener noreferrer">
       <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=rounded&labelColor=000000" alt="License: Apache 2.0">
@@ -13,7 +13,7 @@
     <a href="#" target="_blank" rel="noopener noreferrer">
       <img src="https://img.shields.io/badge/Swift-6-F05138.svg?style=rounded&labelColor=000000" alt="Swift 6">
     </a>
-    <a href="https://deepwiki.com/engels74/claude-island">
+    <a href="https://deepwiki.com/ShuminFu/claude-island">
       <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
     </a>
   </p>
@@ -33,13 +33,13 @@
 
 ## About This Fork
 
-This is a fork of the original [claude-island](https://github.com/farouqaldori/claude-island) by farouqaldori.
+This is a fork of [claude-island](https://github.com/engels74/claude-island) by engels74 (originally from [farouqaldori/claude-island](https://github.com/farouqaldori/claude-island)).
 
 Key improvements in this fork:
 
-- **Code quality** — Strict linting with SwiftFormat, SwiftLint (70+ rules), pre-commit hooks, and modern Swift concurrency (`@Observable`, `Sendable`, structured concurrency)
-- **Bug fixes** — Various stability and reliability improvements
-- **Merged upstream PRs** — See [merged pull requests](https://github.com/engels74/claude-island/pulls?q=is%3Apr+is%3Amerged+) for integration details
+- **Chat history** — Full conversation history with markdown rendering, auto-load on app restart
+- **Smart session list** — Intelligent summaries and system message filtering
+- **Bug fixes** — Fixed overlay window intercepting mouse events (double-click/right-click/drag)
 
 ## Requirements
 
@@ -50,7 +50,7 @@ Key improvements in this fork:
 
 ### Step 1 — Install the App
 
-Download the latest `.dmg` from [GitHub Releases](https://github.com/engels74/claude-island/releases/latest), open it, and drag **Claude Island** into **Applications**. [`IMG`](docs/screenshots/cropped/001.png)
+Download the latest `.dmg` from [GitHub Releases](https://github.com/ShuminFu/claude-island/releases/latest), open it, and drag **Claude Island** into **Applications**. [`IMG`](docs/screenshots/cropped/001.png)
 
 ### Step 2 — Bypass Gatekeeper
 
@@ -76,7 +76,7 @@ macOS prompts for access to **"Claude Code-credentials"** (the CLI's OAuth token
 
 Subsequent launches require no extra setup. Auto-updates via Sparkle work normally.
 
-**Permissions Questions?** Learn more about [why Claude Island needs accessibility and keychain permissions](https://deepwiki.com/search/is-claude-island-safe-to-use-i_b6aed731-54db-4ac4-89e5-7ce9ad984006).
+**Permissions Questions?** See the upstream docs for [why Claude Island needs accessibility and keychain permissions](https://deepwiki.com/search/is-claude-island-safe-to-use-i_b6aed731-54db-4ac4-89e5-7ce9ad984006).
 
 ### Alternative: Terminal Bypass
 

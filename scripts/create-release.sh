@@ -10,7 +10,7 @@ RELEASE_DIR="$PROJECT_DIR/releases"
 KEYS_DIR="$PROJECT_DIR/.sparkle-keys"
 
 # GitHub repository (owner/repo format)
-GITHUB_REPO="engels74/claude-island"
+GITHUB_REPO="ShuminFu/claude-island"
 
 # Website repo for auto-updating appcast
 WEBSITE_DIR="${CLAUDE_ISLAND_WEBSITE:-$PROJECT_DIR/../ClaudeIsland-website}"

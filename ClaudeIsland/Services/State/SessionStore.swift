@@ -310,6 +310,7 @@ actor SessionStore {
 
     private func processHookEvent(_ event: HookEvent) async {
         let sessionID = event.sessionID
+        let isNewSession = self.sessions[sessionID] == nil
         var session = self.sessions[sessionID] ?? self.createSession(from: event)
 
         self.updateSessionMetadata(&session, from: event)
@@ -357,7 +358,22 @@ actor SessionStore {
 
         self.sessions[sessionID] = session
 
-        if event.shouldSyncFile {
+        if isNewSession {
+            // New session discovered — load full chat history from JSONL.
+            // This ensures complete history is available after app restart.
+            // loadHistoryFromFile calls parseFullConversation which populates
+            // incrementalState, so subsequent parseIncremental calls will
+            // correctly detect new content, /clear, and /rewind from the
+            // right file offset.
+            await self.loadHistoryFromFile(sessionID: sessionID, cwd: event.cwd)
+            // Also schedule a file sync if this hook event carries new data
+            // (e.g., first event is UserPromptSubmit with shouldSyncFile=true).
+            // parseIncremental will pick up any content written after the
+            // full history load, preventing data loss.
+            if event.shouldSyncFile {
+                self.scheduleFileSync(sessionID: sessionID, cwd: event.cwd)
+            }
+        } else if event.shouldSyncFile {
             self.scheduleFileSync(sessionID: sessionID, cwd: event.cwd)
         }
     }

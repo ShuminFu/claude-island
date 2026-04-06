@@ -42,6 +42,7 @@ nonisolated struct ConversationInfo: Equatable, Sendable {
     let lastMessageRole: String? // "user", "assistant", or "tool"
     let lastToolName: String? // Tool name if lastMessageRole is "tool"
     let firstUserMessage: String? // Fallback title when no summary
+    let lastUserMessage: String? // Most recent user message (for session list subtitle)
     let lastUserMessageDate: Date? // Timestamp of last user message (for stable sorting)
     let usage: UsageInfo? // Token usage information
 }
@@ -124,6 +125,7 @@ actor ConversationParser {
                 lastMessageRole: nil,
                 lastToolName: nil,
                 firstUserMessage: nil,
+                lastUserMessage: nil,
                 lastUserMessageDate: nil,
                 usage: nil,
             )
@@ -145,6 +147,7 @@ actor ConversationParser {
                 lastMessageRole: nil,
                 lastToolName: nil,
                 firstUserMessage: nil,
+                lastUserMessage: nil,
                 lastUserMessageDate: nil,
                 usage: nil,
             )
@@ -160,6 +163,7 @@ actor ConversationParser {
                 lastMessageRole: nil,
                 lastToolName: nil,
                 firstUserMessage: nil,
+                lastUserMessage: nil,
                 lastUserMessageDate: nil,
                 usage: nil,
             )
@@ -455,6 +459,7 @@ actor ConversationParser {
         var lastMessageRole: String?
         var lastToolName: String?
         var firstUserMessage: String?
+        var lastUserMessage: String?
         var lastUserMessageDate: Date?
 
         // Token usage aggregation
@@ -563,6 +568,7 @@ actor ConversationParser {
                 if !isMeta, let message = json["message"] as? [String: Any] {
                     if let msgContent = message["content"] as? String {
                         if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
+                            lastUserMessage = msgContent
                             if let timestampStr = json["timestamp"] as? String {
                                 lastUserMessageDate = formatter.date(from: timestampStr)
                             }
@@ -587,6 +593,7 @@ actor ConversationParser {
             lastMessageRole: lastMessageRole,
             lastToolName: lastToolName,
             firstUserMessage: firstUserMessage,
+            lastUserMessage: Self.truncateMessage(lastUserMessage, maxLength: 60),
             lastUserMessageDate: lastUserMessageDate,
             usage: usageInfo,
         )

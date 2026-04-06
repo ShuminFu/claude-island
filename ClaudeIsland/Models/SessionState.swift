@@ -34,6 +34,7 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
             lastMessageRole: nil,
             lastToolName: nil,
             firstUserMessage: nil,
+            lastUserMessage: nil,
             lastUserMessageDate: nil,
             usage: nil,
         ),
@@ -184,6 +185,11 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
     /// First user message
     var firstUserMessage: String? {
         self.conversationInfo.firstUserMessage
+    }
+
+    /// Most recent user message (for session list subtitle)
+    var lastUserMessage: String? {
+        self.conversationInfo.lastUserMessage
     }
 
     /// Last user message date

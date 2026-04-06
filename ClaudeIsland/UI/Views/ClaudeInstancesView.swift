@@ -245,6 +245,20 @@ struct InstanceRow: View {
                         }
                     }
 
+                    // Show last user message above current activity
+                    if let lastUserMsg = self.session.lastUserMessage,
+                       self.session.lastMessageRole != "user" {
+                        HStack(spacing: 4) {
+                            Text("You:")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.white.opacity(0.35))
+                            Text(lastUserMsg)
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.3))
+                                .lineLimit(1)
+                        }
+                    }
+
                     if self.isWaitingForApproval, let toolName = self.session.pendingToolName {
                         HStack(spacing: 4) {
                             Text(MCPToolFormatter.formatToolName(toolName))

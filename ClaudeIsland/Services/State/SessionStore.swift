@@ -100,7 +100,9 @@ actor SessionStore {
             await self.processInterrupt(sessionID: sessionID)
 
         case let .rewindDetected(sessionID, cwd):
-            Self.logger.debug("Rewind detected for session \(sessionID, privacy: .public) in \(cwd, privacy: .public)")
+            // RewindWatcher fires this event but the actual rewind handling is done
+            // in the parser (parentUuid chain resolution). Just trigger a file sync.
+            self.scheduleFileSync(sessionID: sessionID, cwd: cwd)
 
         case let .markAsRead(sessionID):
             self.processMarkAsRead(sessionID: sessionID)
@@ -187,21 +189,21 @@ actor SessionStore {
             // Recheck cancellation after await
             guard !Task.isCancelled else { return }
 
-            guard !result.newMessages.isEmpty || result.clearDetected else {
+            guard !result.newMessages.isEmpty || result.clearDetected || result.rewindDetected else {
                 return
             }
 
             // Revalidate session still exists before processing file update
             guard self.sessions[sessionID] != nil else { return }
 
-            // Clear detection is merged into the payload (single actor hop) to avoid
-            // a race condition where a separate .clearDetected event could be processed
-            // but the follow-up .fileUpdated never arrives (task cancelled between hops).
+            // When rewind is detected, send ALL messages (active chain only) as a full replacement.
+            // This is similar to /clear handling — both need non-incremental payloads.
+            let isFullReplacement = result.clearDetected || result.rewindDetected
             let payload = FileUpdatePayload(
                 sessionID: sessionID,
                 cwd: cwd,
-                messages: result.newMessages,
-                isIncremental: !result.clearDetected,
+                messages: isFullReplacement ? result.allMessages : result.newMessages,
+                isIncremental: !isFullReplacement,
                 clearDetected: result.clearDetected,
                 completedToolIDs: result.completedToolIDs,
                 toolResults: result.toolResults,
@@ -227,8 +229,6 @@ actor SessionStore {
     /// Pending file syncs (debounced)
     private var pendingSyncs: [String: Task<Void, Never>] = [:]
 
-    /// Active rewind watchers, keyed by sessionID
-    private var rewindWatchers: [String: RewindWatcher] = [:]
 
     /// Sync debounce interval (100ms)
     private let syncDebounce: Duration = .milliseconds(100)
@@ -315,21 +315,9 @@ actor SessionStore {
 
         self.updateSessionMetadata(&session, from: event)
 
-        // Start rewind watcher for new sessions
-        if self.rewindWatchers[sessionID] == nil {
-            let watcher = RewindWatcher(sessionID: sessionID, cwd: event.cwd) { sid, cwd in
-                Task(name: "rewind-detected") {
-                    await SessionStore.shared.process(.rewindDetected(sessionID: sid, cwd: cwd))
-                }
-            }
-            Task(name: "rewind-watcher-start") { await watcher.start() }
-            self.rewindWatchers[sessionID] = watcher
-        }
-
         if event.status == "ended" {
             self.sessions.removeValue(forKey: sessionID)
             self.cancelPendingSync(sessionID: sessionID)
-            self.stopRewindWatcher(sessionID: sessionID)
             return
         }
 
@@ -699,6 +687,16 @@ actor SessionStore {
             Self.logger.debug("Clear: reset chatItems from \(previousCount) to \(session.chatItems.count)")
         }
 
+        // Handle /rewind — full replacement with active chain messages only.
+        // Reset all state and rebuild from the filtered message set.
+        if !payload.isIncremental && !payload.clearDetected {
+            let previousCount = session.chatItems.count
+            session.chatItems = []
+            session.toolTracker = ToolTracker()
+            session.subagentState = SubagentState()
+            Self.logger.info("Rewind: reset chatItems from \(previousCount), rebuilding from \(payload.messages.count) messages")
+        }
+
         self.processMessages(
             from: payload,
             into: &session,
@@ -727,64 +725,6 @@ actor SessionStore {
             toolResults: payload.toolResults,
             structuredResults: payload.structuredResults,
         )
-    }
-
-    // MARK: - Rewind Processing
-
-    private func processRewind(sessionID: String, cwd: String) async {
-        // Cancel any pending file sync to avoid race with stale incremental parse
-        self.cancelPendingSync(sessionID: sessionID)
-
-        // Phase 1: Async work — full re-parse from beginning
-        let result = await ConversationParser.shared.reparseAfterTruncation(
-            sessionID: sessionID,
-            cwd: cwd,
-        )
-        let conversationInfo = await ConversationParser.shared.parse(
-            sessionID: sessionID,
-            cwd: cwd,
-        )
-
-        // Phase 2: Sync state mutation — re-read session after await
-        guard var session = sessions[sessionID] else { return }
-
-        // Reset all chat state
-        session.chatItems = []
-        session.toolTracker = ToolTracker()
-        session.subagentState = SubagentState()
-        session.conversationInfo = conversationInfo
-
-        // Rebuild chatItems from re-parsed messages
-        let payload = FileUpdatePayload(
-            sessionID: sessionID,
-            cwd: cwd,
-            messages: result.allMessages,
-            isIncremental: false,
-            clearDetected: false,
-            completedToolIDs: result.completedToolIDs,
-            toolResults: result.toolResults,
-            structuredResults: result.structuredResults,
-        )
-        self.processMessages(from: payload, into: &session)
-        session.chatItems.sort { $0.timestamp < $1.timestamp }
-
-        self.populateSubagentToolsSync(
-            session: &session,
-            cwd: cwd,
-            structuredResults: result.structuredResults,
-        )
-
-        self.sessions[sessionID] = session
-
-        self.emitToolCompletionEvents(
-            sessionID: sessionID,
-            session: session,
-            completedToolIDs: result.completedToolIDs,
-            toolResults: result.toolResults,
-            structuredResults: result.structuredResults,
-        )
-
-        Self.logger.info("Rewind processed for \(sessionID.prefix(8), privacy: .public): rebuilt \(session.chatItems.count) items")
     }
 
     /// Process messages from payload into session chat items
@@ -982,13 +922,6 @@ actor SessionStore {
     private func processSessionEnd(sessionID: String) async {
         self.sessions.removeValue(forKey: sessionID)
         self.cancelPendingSync(sessionID: sessionID)
-        self.stopRewindWatcher(sessionID: sessionID)
-    }
-
-    private func stopRewindWatcher(sessionID: String) {
-        if let watcher = self.rewindWatchers.removeValue(forKey: sessionID) {
-            Task(name: "rewind-watcher-stop") { await watcher.stop() }
-        }
     }
 
     // MARK: - History Loading
@@ -1076,7 +1009,16 @@ actor SessionStore {
     // MARK: - State Publishing
 
     private func publishState() {
-        let sortedSessions = Array(sessions.values).sorted { $0.projectName < $1.projectName }
+        let sortedSessions = Array(sessions.values)
+            .filter { session in
+                // Hide sessions that have no user interaction yet
+                // (e.g. empty conversations that only received Stop events)
+                if session.chatItems.isEmpty, session.conversationInfo.firstUserMessage == nil {
+                    return session.phase.isActive || session.phase.isWaitingForApproval
+                }
+                return true
+            }
+            .sorted { $0.projectName < $1.projectName }
         for (_, continuation) in self.sessionsContinuations {
             continuation.yield(sortedSessions)
         }

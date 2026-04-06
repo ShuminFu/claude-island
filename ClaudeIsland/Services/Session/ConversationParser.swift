@@ -87,6 +87,7 @@ actor ConversationParser {
         let toolResults: [String: ToolResult]
         let structuredResults: [String: ToolResultData]
         let clearDetected: Bool
+        let rewindDetected: Bool // /rewind created a fork; allMessages is the active chain only
     }
 
     /// Maximum file size (10 MB) before switching to incremental parsing
@@ -207,6 +208,7 @@ actor ConversationParser {
                 toolResults: [:],
                 structuredResults: [:],
                 clearDetected: false,
+                rewindDetected: false,
             )
         }
 
@@ -218,6 +220,10 @@ actor ConversationParser {
         if clearDetected {
             state.clearPending = false
         }
+        let rewindDetected = state.rewindPending
+        if rewindDetected {
+            state.rewindPending = false
+        }
         self.incrementalState[sessionID] = state
 
         return IncrementalParseResult(
@@ -227,6 +233,7 @@ actor ConversationParser {
             toolResults: state.toolResults,
             structuredResults: state.structuredResults,
             clearDetected: clearDetected,
+            rewindDetected: rewindDetected,
         )
     }
 
@@ -272,6 +279,7 @@ actor ConversationParser {
                 toolResults: [:],
                 structuredResults: [:],
                 clearDetected: false,
+                rewindDetected: false,
             )
         }
 
@@ -287,6 +295,7 @@ actor ConversationParser {
             toolResults: state.toolResults,
             structuredResults: state.structuredResults,
             clearDetected: false,
+            rewindDetected: false,
         )
     }
 
@@ -302,6 +311,18 @@ actor ConversationParser {
     }
 
     // MARK: Private
+
+    /// Walk the parentUuid chain backwards from the last message to find all UUIDs on the active branch.
+    /// Messages not in the returned set are on abandoned branches (from /rewind).
+    private func resolveActiveChain(lastUUID: String, parentMap: [String: String]) -> Set<String> {
+        var activeIDs = Set<String>()
+        var current: String? = lastUUID
+        while let uuid = current {
+            activeIDs.insert(uuid)
+            current = parentMap[uuid]
+        }
+        return activeIDs
+    }
 
     private struct CachedInfo {
         let modificationDate: Date
@@ -319,6 +340,10 @@ actor ConversationParser {
         var structuredResults: [String: ToolResultData] = [:] // Structured results keyed by tool_use_id
         var lastClearOffset: UInt64 = 0 // Offset of last /clear command (0 = none or at start)
         var clearPending = false // True if a /clear was just detected
+        // Conversation tree tracking for /rewind support
+        var parentMap: [String: String] = [:] // uuid → parentUuid (conversation tree)
+        var lastUUID: String? // UUID of the most recently parsed message
+        var rewindPending = false // True if a fork was detected (rewind happened)
     }
 
     // MARK: - Nonisolated File I/O Helpers
@@ -717,6 +742,11 @@ actor ConversationParser {
                 if let lineData = lineStr.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                    let message = parseMessageLine(json, seenToolIDs: &state.seenToolIDs, toolIDToName: &state.toolIDToName) {
+                    // Track conversation tree for /rewind detection
+                    if let parentUUID = json["parentUuid"] as? String {
+                        state.parentMap[message.id] = parentUUID
+                    }
+                    state.lastUUID = message.id
                     newMessages.append(message)
                     state.messages.append(message)
                 }
@@ -725,6 +755,21 @@ actor ConversationParser {
         }
 
         state.lastFileOffset = readResult.newFileSize
+
+        // Detect /rewind: if any new message's parentUuid points to a message that
+        // already has a different child in state.messages, a fork occurred.
+        // Resolve by filtering to only the active chain (from last message backwards).
+        if !state.parentMap.isEmpty, let lastUUID = state.lastUUID {
+            let activeIDs = self.resolveActiveChain(lastUUID: lastUUID, parentMap: state.parentMap)
+            let beforeCount = state.messages.count
+            state.messages = state.messages.filter { activeIDs.contains($0.id) }
+            let afterCount = state.messages.count
+            if afterCount < beforeCount {
+                state.rewindPending = true
+                Self.logger.info("Rewind detected: \(beforeCount) → \(afterCount) messages (active chain)")
+            }
+        }
+
         return newMessages
     }
 

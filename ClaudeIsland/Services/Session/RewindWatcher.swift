@@ -157,23 +157,13 @@ actor RewindWatcher {
         self.startFileWatcher()
     }
 
-    /// Debounced truncation check — coalesces rapid DispatchSource events (e.g., consecutive rewinds)
+    /// Check file size on every DispatchSource event. If truncation is detected,
+    /// fire the callback immediately (no debounce) since /rewind is a discrete user action.
+    /// Normal growth just updates lastKnownSize for future comparison.
     private func checkForTruncation() {
-        self.debounceTask?.cancel()
-        self.debounceTask = Task(name: "rewind-debounce") {
-            try? await Task.sleep(for: .milliseconds(100))
-            guard !Task.isCancelled else { return }
-            await self.performTruncationCheck()
-        }
-    }
-
-    /// Compare current file size against last known size via stat (not fd seek).
-    /// Using attributesOfItem avoids stale fd issues after truncation.
-    private func performTruncationCheck() {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: self.filePath),
               let currentSize = attrs[.size] as? UInt64
         else {
-            // File deleted or inaccessible — not a rewind; session end handles cleanup
             return
         }
 
@@ -181,14 +171,21 @@ actor RewindWatcher {
             Self.logger.info(
                 "Truncation detected for \(self.sessionID.prefix(8), privacy: .public): \(self.lastKnownSize) → \(currentSize)",
             )
-            let sid = self.sessionID
-            let cwd = self.cwd
-            let callback = self.onTruncation
-            Task(name: "rewind-notify") {
+            self.lastKnownSize = currentSize
+            // Debounce the notification to coalesce rapid consecutive rewinds,
+            // but the size comparison above always uses the latest lastKnownSize
+            self.debounceTask?.cancel()
+            self.debounceTask = Task(name: "rewind-debounce") {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+                let sid = self.sessionID
+                let cwd = self.cwd
+                let callback = self.onTruncation
                 callback(sid, cwd)
             }
+        } else {
+            self.lastKnownSize = currentSize
         }
-        self.lastKnownSize = currentSize
     }
 
     private func cleanupFileHandle() {

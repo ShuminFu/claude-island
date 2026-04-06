@@ -167,6 +167,51 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
         self.conversationInfo.summary ?? self.conversationInfo.firstUserMessage ?? self.projectName
     }
 
+    /// Smart one-line summary synthesized from session data.
+    /// Priority: explicit summary → "[userMsg] → [tool]: [lastMsg]" → direct JSONL parse → nil
+    var smartSummary: String? {
+        if let summary = self.conversationInfo.summary {
+            return summary
+        }
+
+        let prefix: String
+        if let latest = self.conversationInfo.lastUserMessage {
+            prefix = latest.count > 30 ? String(latest.prefix(30)) + "..." : latest
+        } else if let first = self.conversationInfo.firstUserMessage {
+            prefix = first.count > 30 ? String(first.prefix(30)) + "..." : first
+        } else {
+            prefix = self.projectName
+        }
+
+        if let toolName = self.conversationInfo.lastToolName {
+            let lastPart: String
+            if let last = self.conversationInfo.lastMessage {
+                lastPart = last.count > 40 ? String(last.prefix(40)) + "..." : last
+            } else {
+                lastPart = ""
+            }
+            if lastPart.isEmpty {
+                return "\(prefix) → \(toolName)"
+            }
+            return "\(prefix) → \(toolName): \(lastPart)"
+        }
+
+        // No tool name — just return prefix if we have any useful info
+        if self.conversationInfo.firstUserMessage != nil || self.conversationInfo.lastMessage != nil {
+            if let last = self.conversationInfo.lastMessage {
+                let lastPart = last.count > 40 ? String(last.prefix(40)) + "..." : last
+                return "\(prefix): \(lastPart)"
+            }
+            return prefix
+        }
+
+        // Fallback: directly read JSONL to extract first user message
+        if let msg = Self.directParseFirstMessage(sessionID: self.sessionID, cwd: self.cwd) {
+            return msg
+        }
+        return nil
+    }
+
     /// Best hint for matching window title
     var windowHint: String {
         self.conversationInfo.summary ?? self.projectName
@@ -230,6 +275,89 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
     /// Whether the session can be interacted with
     var canInteract: Bool {
         self.phase.needsAttention
+    }
+
+    // MARK: - Smart Summary Helpers
+
+    /// Emergency fallback: read JSONL directly without going through ConversationParser
+    private static func directParseFirstMessage(sessionID: String, cwd: String) -> String? {
+        var searchCwd = cwd
+        let projectsDir = NSHomeDirectory() + "/.claude/projects"
+
+        while !searchCwd.isEmpty, searchCwd != "/" {
+            let projectDir = searchCwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+            let path = projectsDir + "/" + projectDir + "/" + sessionID + ".jsonl"
+            if FileManager.default.fileExists(atPath: path) {
+                return parseFirstUserMessage(from: path)
+            }
+            searchCwd = (searchCwd as NSString).deletingLastPathComponent
+        }
+        return nil
+    }
+
+    private static func parseFirstUserMessage(from path: String) -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let content = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        var lastUserMsg: String?
+        var lastAssistantMsg: String?
+
+        for line in lines.reversed().prefix(500) {
+            guard let ld = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: ld) as? [String: Any],
+                  let type = json["type"] as? String,
+                  !(json["isMeta"] as? Bool ?? false),
+                  let msg = json["message"] as? [String: Any]
+            else { continue }
+
+            guard let text = extractText(from: msg) else { continue }
+
+            if type == "assistant", lastAssistantMsg == nil {
+                lastAssistantMsg = String(text.prefix(80))
+            }
+            if type == "user", lastUserMsg == nil {
+                lastUserMsg = String(text.prefix(40))
+            }
+            if lastUserMsg != nil, lastAssistantMsg != nil { break }
+        }
+
+        if let user = lastUserMsg, let assistant = lastAssistantMsg {
+            let userPart = user.count > 30 ? String(user.prefix(30)) + "..." : user
+            let assistPart = assistant.count > 50 ? String(assistant.prefix(50)) + "..." : assistant
+            return "\(userPart)\n\(assistPart)"
+        }
+        if let assistant = lastAssistantMsg {
+            return assistant
+        }
+        return lastUserMsg
+    }
+
+    /// Extract text content from a message (handles both String and Array formats)
+    private static func extractText(from msg: [String: Any]) -> String? {
+        if let content = msg["content"] as? String,
+           !Self.isSystemPrefix(content) {
+            return content
+        }
+        if let arr = msg["content"] as? [[String: Any]] {
+            for block in arr where block["type"] as? String == "text" {
+                if let text = block["text"] as? String,
+                   !Self.isSystemPrefix(text),
+                   !text.hasPrefix("[Request interrupted") {
+                    return text
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func isSystemPrefix(_ text: String) -> Bool {
+        text.hasPrefix("<command-name>") ||
+            text.hasPrefix("<local-command") ||
+            text.hasPrefix("<system-reminder>") ||
+            text.hasPrefix("<task-notification>") ||
+            text.hasPrefix("Caveat:")
     }
 }
 

@@ -124,7 +124,7 @@ struct ClaudeInstancesView: View {
 
 // MARK: - InstanceRow
 
-struct InstanceRow: View {
+struct InstanceRow: View { // swiftlint:disable:this type_body_length
     // MARK: Internal
 
     let session: SessionState
@@ -352,6 +352,40 @@ struct InstanceRow: View {
                             .font(.system(size: 11))
                             .foregroundColor(.white.opacity(0.4))
                             .lineLimit(1)
+                    } else if let summary = self.session.smartSummary {
+                        let parts = summary.components(separatedBy: "\n")
+                        if parts.count >= 2 {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 4) {
+                                    Text("You:")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.5))
+                                    Text(parts[0])
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.white.opacity(0.7))
+                                        .lineLimit(1)
+                                }
+                                HStack(spacing: 4) {
+                                    Text("AI:")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.cyan.opacity(0.7))
+                                    Text(parts[1])
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.cyan.opacity(0.5))
+                                        .lineLimit(1)
+                                }
+                            }
+                        } else {
+                            HStack(spacing: 4) {
+                                Text("AI:")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.cyan.opacity(0.7))
+                                Text(summary)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.cyan.opacity(0.5))
+                                    .lineLimit(1)
+                            }
+                        }
                     } else {
                         Text(self.phaseStatusText)
                             .font(.system(size: 11))

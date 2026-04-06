@@ -392,6 +392,16 @@ actor ConversationParser {
         return input.values.compactMap { $0 as? String }.first { !$0.isEmpty } ?? ""
     }
 
+    /// Check if a message is a system/meta message that should be filtered out
+    private static func isSystemMessage(_ text: String) -> Bool {
+        text.hasPrefix("<command-name>") ||
+            text.hasPrefix("<command-message>") ||
+            text.hasPrefix("<local-command") ||
+            text.hasPrefix("<task-notification>") ||
+            text.hasPrefix("<system-reminder>") ||
+            text.hasPrefix("Caveat:")
+    }
+
     /// Truncate message for display
     private static func truncateMessage(_ message: String?, maxLength: Int = 80) -> String? {
         guard let msg = message else { return nil }
@@ -571,7 +581,7 @@ actor ConversationParser {
             if type == "user" && !isMeta {
                 if let message = json["message"] as? [String: Any],
                    let msgContent = message["content"] as? String {
-                    if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
+                    if !Self.isSystemMessage(msgContent) {
                         firstUserMessage = Self.truncateMessage(msgContent, maxLength: 50)
                         break
                     }
@@ -594,8 +604,7 @@ actor ConversationParser {
                     let isMeta = json["isMeta"] as? Bool ?? false
                     if !isMeta, let message = json["message"] as? [String: Any] {
                         if let msgContent = message["content"] as? String {
-                            if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent
-                                .hasPrefix("Caveat:") {
+                            if !Self.isSystemMessage(msgContent) {
                                 lastMessage = msgContent
                                 lastMessageRole = type
                             }
@@ -626,7 +635,7 @@ actor ConversationParser {
                 let isMeta = json["isMeta"] as? Bool ?? false
                 if !isMeta, let message = json["message"] as? [String: Any] {
                     if let msgContent = message["content"] as? String {
-                        if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
+                        if !Self.isSystemMessage(msgContent) {
                             lastUserMessage = msgContent
                             if let timestampStr = json["timestamp"] as? String {
                                 lastUserMessageDate = formatter.date(from: timestampStr)
@@ -805,7 +814,7 @@ actor ConversationParser {
         blocks.reserveCapacity(4) // Most messages have 2-4 blocks
 
         if let content = messageDict["content"] as? String {
-            if content.hasPrefix("<command-name>") || content.hasPrefix("<local-command") || content.hasPrefix("Caveat:") {
+            if Self.isSystemMessage(content) {
                 return nil
             }
             if content.hasPrefix("[Request interrupted by user") {

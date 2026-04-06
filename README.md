@@ -47,6 +47,41 @@ Key improvements in this fork:
 
 - macOS 15.6+
 - Claude Code CLI
+- **Python 3.14+** or **[uv](https://docs.astral.sh/uv/)** — the hook script requires one of these to run
+
+### Installing Python 3.14
+
+The app will prompt you on first launch if no suitable runtime is found. You can install ahead of time:
+
+**Option A — uv (recommended, no Python install needed):**
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Installs to ~/.local/bin/uv
+```
+
+**Option B — Homebrew:**
+
+```bash
+brew install python@3.14
+# Installs to /opt/homebrew/bin/python3.14 (Apple Silicon)
+# or /usr/local/bin/python3.14 (Intel)
+```
+
+**Option C — pyenv:**
+
+```bash
+pyenv install 3.14
+# Installs to ~/.pyenv/versions/3.14.x/bin/python3
+```
+
+**Option D — Official installer:**
+
+Download from [python.org/downloads](https://www.python.org/downloads/).
+
+> **Note:** macOS ships with Python 3, but it is typically too old. The hook script (`~/.claude/hooks/claude-island-state.py`) requires Python 3.14+ features.
+
+> **How it works:** On first launch, Claude Island detects the runtime once and writes the **absolute path** into `~/.claude/settings.json` (e.g. `/opt/homebrew/bin/uv run ~/.claude/hooks/claude-island-state.py` or `/opt/homebrew/bin/python3.14 ~/.claude/hooks/claude-island-state.py`). The app searches in this order: uv → versioned python3.14 (Homebrew) → pyenv 3.14.x → generic python3 (if ≥ 3.14). If you later change your Python installation, relaunch the app to re-detect.
 
 ## Installation Guide
 

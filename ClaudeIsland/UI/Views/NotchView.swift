@@ -589,8 +589,26 @@ struct NotchView: View {
                 }
             }
 
-            // Normal mode: let ViewModel handle navigation
+            // Normal mode: permission shortcuts (a = approve, d = deny)
             let sorted = sm.instances.sortedByPriority()
+            if case .instances = vm.contentType,
+               let selectedID = vm.selectedInstanceID,
+               let session = sorted.first(where: { $0.stableID == selectedID }),
+               session.phase.isWaitingForApproval,
+               session.pendingToolName != "AskUserQuestion" {
+                switch event.keyCode {
+                case 0: // 'a' key → approve
+                    sm.approvePermission(sessionID: session.sessionID)
+                    return nil
+                case 2: // 'd' key → deny
+                    sm.denyPermission(sessionID: session.sessionID, reason: nil)
+                    return nil
+                default:
+                    break
+                }
+            }
+
+            // Normal mode: let ViewModel handle navigation
             if vm.handleKeyDown(keyCode: event.keyCode, modifiers: event.modifierFlags, sortedInstances: sorted) {
                 return nil // Consume the event
             }

@@ -229,7 +229,6 @@ actor SessionStore {
     /// Pending file syncs (debounced)
     private var pendingSyncs: [String: Task<Void, Never>] = [:]
 
-
     /// Sync debounce interval (100ms)
     private let syncDebounce: Duration = .milliseconds(100)
 

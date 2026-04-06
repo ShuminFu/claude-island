@@ -453,13 +453,18 @@ struct InlineApprovalButtons: View {
             Button {
                 self.onReject()
             } label: {
-                Text("Deny")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white.opacity(0.6))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.1))
-                    .clipShape(Capsule())
+                HStack(spacing: 3) {
+                    Text("d")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                    Text("Deny")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.1))
+                .clipShape(Capsule())
             }
             .buttonStyle(.plain)
             .opacity(self.showDenyButton ? 1 : 0)
@@ -468,13 +473,18 @@ struct InlineApprovalButtons: View {
             Button {
                 self.onApprove()
             } label: {
-                Text("Allow")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.9))
-                    .clipShape(Capsule())
+                HStack(spacing: 3) {
+                    Text("a")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.black.opacity(0.4))
+                    Text("Allow")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.black)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.9))
+                .clipShape(Capsule())
             }
             .buttonStyle(.plain)
             .opacity(self.showAllowButton ? 1 : 0)

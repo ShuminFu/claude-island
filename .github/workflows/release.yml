@@ -254,25 +254,44 @@ jobs:
           retention-days: 90
 
   update-website:
-    name: Update Website Appcast
+    name: Update funfun-zone appcast
     needs: build
     runs-on: ubuntu-latest
     # Only run if Sparkle signing was configured AND signature was actually generated
     if: needs.build.outputs.has_sparkle == 'true' && needs.build.outputs.ed_signature != ''
 
     steps:
-      - name: Trigger website appcast update
-        uses: peter-evans/repository-dispatch@v4
+      - name: Download appcast artifact
+        uses: actions/download-artifact@v8
         with:
-          token: ${{ secrets.WEBSITE_PAT }}
-          repository: ShuminFu/claude-island-web
-          event-type: update-appcast
-          client-payload: |
-            {
-              "version": "${{ needs.build.outputs.version }}",
-              "build_number": "${{ needs.build.outputs.build_number }}",
-              "download_url": "https://github.com/ShuminFu/claude-island/releases/download/${{ needs.build.outputs.version }}/ClaudeIsland-${{ needs.build.outputs.version }}.dmg",
-              "ed_signature": "${{ needs.build.outputs.ed_signature }}",
-              "file_size": "${{ needs.build.outputs.dmg_size }}",
-              "min_system_version": "${{ needs.build.outputs.min_system }}"
-            }
+          name: appcast
+          path: appcast-dl
+
+      - name: Checkout funfun-zone
+        uses: actions/checkout@v6
+        with:
+          repository: ShuminFu/funfun-zone
+          token: ${{ secrets.FUNFUN_ZONE_PAT }}
+          path: funfun-zone
+          ref: main
+
+      - name: Copy appcast.xml into funfun-zone/public
+        run: |
+          cp appcast-dl/appcast.xml funfun-zone/public/appcast.xml
+
+      - name: Commit and push appcast update
+        working-directory: funfun-zone
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet public/appcast.xml; then
+            echo "appcast.xml unchanged, nothing to commit"
+            exit 0
+          fi
+
+          VERSION="${{ needs.build.outputs.version }}"
+          git add public/appcast.xml
+          git commit -m "chore: update appcast.xml for Claude Island $VERSION"
+          git push origin main
+          echo "✅ Pushed appcast for $VERSION to funfun-zone"

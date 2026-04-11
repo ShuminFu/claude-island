@@ -19,9 +19,9 @@
 
     <!-- Sparkle Update Configuration -->
     <key>SUFeedURL</key>
-    <string>https://claudeisland.engels74.net/appcast.xml</string>
+    <string>https://funfun.zone/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>55W3Ruwj75ntumKWPDExUq3gZX8DuYez0KFCT90CeYs=</string>
+    <string>BD+OFwvBWWIIb1fP0vaJhHMNFRi5k2nkbY3raGSOiG0=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
 </dict>

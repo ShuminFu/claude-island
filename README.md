@@ -25,11 +25,15 @@
 
 ## Features
 
-- **Notch UI** — Animated overlay that expands from the MacBook notch
-- **Live Session Monitoring** — Track multiple Claude Code sessions in real-time
-- **Permission Approvals** — Approve or deny tool executions directly from the notch
-- **Chat History** — View full conversation history with markdown rendering
-- **Auto-Setup** — Hooks install automatically on first launch
+- **Notch UI** — Animated overlay that expands from the MacBook notch with a plugin-based module system (session dots, activity spinner, permission indicator, token rings, Clawd mascot, timer, etc.)
+- **Detachable Panel** — Drag the notch off the menu bar into a free-floating panel; releases snap back magnetically when dragged near the top of the screen
+- **Live Session Monitoring** — Track multiple Claude Code sessions in real-time with intelligent summaries and system message filtering
+- **Permission Approvals** — Approve or deny tool executions directly from the notch with keyboard shortcuts
+- **Chat History** — Full conversation history with markdown rendering, auto-loaded on app restart; split view that keeps the active turn pinned while earlier turns stay scrollable above
+- **Global Hotkey** — System-wide keyboard shortcut to toggle the panel, registered via Carbon so keys are consumed at the window-server level and never leak into the focused app
+- **Terminal Integration** — Jump to the correct tmux pane of any session; automatically un-minimizes and raises terminal windows across Spaces
+- **Token Tracking** — Optional usage/quota rings backed by the Anthropic API via Claude Code's OAuth token
+- **Auto-Setup** — Python/uv runtime detection and hook installation on first launch
 
 ## About This Fork
 
@@ -37,11 +41,13 @@ This is a fork of [claude-island](https://github.com/engels74/claude-island) by 
 
 Key improvements in this fork:
 
-- **Chat history** — Full conversation history with markdown rendering, auto-load on app restart
+- **Draggable detached panel** — Pull the notch down into a free-floating, movable panel with magnetic snap-back when dragged near the menu bar
+- **Global hotkey isolation** — Carbon-based hotkey registration so shortcuts don't leak characters into text fields
+- **Chat history** — Full conversation history with markdown rendering, auto-loaded on app restart; correct JSONL parser traversal through attachment/system/snapshot messages so long histories aren't truncated
 - **Smart session list** — Intelligent summaries, system message filtering, unread markers on hover/select
 - **Keyboard navigation** — Shortcut hints on approval buttons, keyboard scrolling in session details, quick approve/deny via hotkeys
-- **Terminal integration** — Tab flash prompts for all terminal jump entries, Git info display
-- **Bug fixes** — Fixed overlay window intercepting mouse events, panel mouse trapping, `/clear` blank session, and more
+- **Terminal integration** — Un-minimize and raise terminal windows (including across Spaces), tab-flash prompts for all terminal jump entries, Git info display
+- **Bug fixes** — Overlay window intercepting mouse events, panel mouse trapping, `/clear` blank session, hover highlights dying after resize, click-through on transparent button areas, and more
 
 ## Requirements
 

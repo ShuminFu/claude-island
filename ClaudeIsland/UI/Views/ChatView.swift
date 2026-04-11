@@ -452,6 +452,12 @@ struct ChatView: View {
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: self.turnSplit.previous.isEmpty)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: self.currentTurnContentHeight)
+        // Enable mouse text selection (and Cmd+C copy) for all Text descendants in the
+        // message list. SwiftUI Text is non-selectable by default; `.textSelection` is
+        // an environment-propagated modifier, so applying it once here covers
+        // MarkdownText, code blocks, thinking blocks, and tool-call output without
+        // touching individual renderers.
+        .textSelection(.enabled)
     }
 
     private var inputBar: some View {

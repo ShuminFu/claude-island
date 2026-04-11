@@ -239,10 +239,27 @@ else
             # Copy DMG to appcast directory
             cp "$DMG_PATH" "$APPCAST_DIR/"
 
-            # Generate appcast.xml
-            "$GENERATE_APPCAST" --ed-key-file "$KEYS_DIR/eddsa_private_key" "$APPCAST_DIR"
+            # Compute the DMG download URL prefix for the appcast enclosure.
+            # CI path (--skip-github) uses bare semver tags (e.g. "1.7.1"),
+            # the local path (gh release create "v$VERSION") uses the "v"
+            # prefix. We must match the tag convention or Sparkle will 404.
+            if [ "$SKIP_GITHUB" = true ]; then
+                DOWNLOAD_URL_PREFIX="https://github.com/$GITHUB_REPO/releases/download/$VERSION/"
+            else
+                DOWNLOAD_URL_PREFIX="https://github.com/$GITHUB_REPO/releases/download/v$VERSION/"
+            fi
+
+            # Generate appcast.xml (URL prefix makes Sparkle download the
+            # DMG from GitHub Releases instead of resolving it relative to
+            # the appcast.xml URL, which would be wrong since we host the
+            # appcast on funfun.zone but the DMG on GitHub).
+            "$GENERATE_APPCAST" \
+                --ed-key-file "$KEYS_DIR/eddsa_private_key" \
+                --download-url-prefix "$DOWNLOAD_URL_PREFIX" \
+                "$APPCAST_DIR"
 
             echo "Appcast generated at: $APPCAST_DIR/appcast.xml"
+            echo "Enclosure URL prefix: $DOWNLOAD_URL_PREFIX"
         fi
     fi
 

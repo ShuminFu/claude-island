@@ -200,6 +200,18 @@ extension NotchWindowController {
         let hostingView = FirstMouseHostingView(
             rootView: DetachedNotchView(
                 viewModel: vm,
+                currentPanelOrigin: { [weak self] in
+                    // Return the panel's actual current frame origin. During a
+                    // content-type resize animation this is mid-interpolation
+                    // while `viewModel.detachedOrigin` already holds the target
+                    // — anchoring from the target is what caused the drag to
+                    // teleport. Also sync `detachedOrigin` so non-drag consumers
+                    // read the same value the drag is anchored from.
+                    guard let self, let panel = self.detachedPanel else { return nil }
+                    let origin = panel.frame.origin
+                    self.viewModel.detachedOrigin = origin
+                    return origin
+                },
                 onDrag: { [weak self] origin in
                     self?.detachedPanel?.setFrameOrigin(NSPoint(x: origin.x, y: origin.y))
                 },

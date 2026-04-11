@@ -205,6 +205,10 @@ struct ChatView: View {
     /// Logger for image paste operations
     nonisolated private static let logger = Logger(subsystem: "com.engels74.ClaudeIsland", category: "ChatView")
 
+    /// Identifier assigned to the current-turn `NSScrollView` so keyboard scroll
+    /// commands can find it unambiguously (there is also a previous-turns scroll view).
+    nonisolated private static let currentTurnScrollViewID = NSUserInterfaceItemIdentifier("ChatView.currentTurnScroll")
+
     @State private var inputText = ""
     @State private var history: [ChatHistoryItem] = []
     @State private var session: SessionState
@@ -229,6 +233,15 @@ struct ChatView: View {
     @State private var scrollbarHideTask: Task<Void, Never>?
     /// Whether the mini scrollbar is currently visible.
     @State private var isScrollbarVisible = false
+    /// Measured natural height of the current-turn content (LazyVStack + padding).
+    /// Used to shrink the bottom section to its content height when there are previous turns above,
+    /// capped at `currentTurnMaxRatio * containerHeight`.
+    @State private var currentTurnContentHeight: CGFloat = 0
+    /// Measured available height of the messageList container, captured via a non-greedy
+    /// `.background` GeometryReader. We can't use a top-level GeometryReader for this because
+    /// GeometryReader is greedy with vertical space inside a VStack and was pushing the
+    /// approval/input bar below the visible area of the notch panel.
+    @State private var messageListAvailableHeight: CGFloat = 0
 
     // MARK: - Header
 
@@ -272,6 +285,42 @@ struct ChatView: View {
             }
         }
         return ""
+    }
+
+    /// Split history so that the full chat transcript — including the most recent
+    /// user message — lives in the top section, and only the post-user tail
+    /// (assistant/tool/thinking items produced in response to that user message)
+    /// lives in the inverted bottom section.
+    ///
+    /// `previous` = `history[...lastUserIdx]` — everything up to and **including** the last user message.
+    /// `current`  = `history[(lastUserIdx + 1)...]` — the live tail that comes after it.
+    ///
+    /// When there is no user message at all, we fall back to the old behavior:
+    /// everything goes to `current` so nothing in the transcript is lost.
+    private var turnSplit: (previous: [ChatHistoryItem], current: [ChatHistoryItem]) {
+        guard let splitIdx = self.history.lastIndex(where: {
+            if case .user = $0.type { return true }
+            return false
+        })
+        else {
+            return (previous: [], current: self.history)
+        }
+        return (
+            previous: Array(self.history[...splitIdx]),
+            current: Array(self.history[(splitIdx + 1)...]),
+        )
+    }
+
+    /// Maximum fraction of the messageList's height that the current-turn section
+    /// is allowed to consume when there are previous turns above it.
+    private var currentTurnMaxRatio: CGFloat {
+        0.7
+    }
+
+    /// Minimum height of the current-turn section (prevents it from collapsing
+    /// to 0 before the first `onGeometryChange` fires).
+    private var currentTurnMinHeight: CGFloat {
+        120
     }
 
     // MARK: - Input Bar
@@ -357,118 +406,52 @@ struct ChatView: View {
     }
 
     private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: 16) {
-                    // Invisible anchor at bottom (first due to flip)
-                    Color.clear
-                        .frame(height: 1)
-                        .id("bottom")
+        VStack(spacing: 0) {
+            // Top: previous turns (natural chronological order).
+            // Only rendered when there is at least one prior turn.
+            if !self.turnSplit.previous.isEmpty {
+                self.previousTurnsList
+                    .frame(maxHeight: .infinity)
 
-                    // Processing indicator at bottom (first due to flip)
-                    if self.isProcessing {
-                        ProcessingIndicatorView(turnID: self.lastUserMessageID)
-                            .padding(.horizontal, 16)
-                            .scaleEffect(x: 1, y: -1)
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .scale(scale: 0.95)).combined(with: .offset(y: -4)),
-                                removal: .opacity,
-                            ))
-                    }
+                // Separator between the two sections. Kept subtle but
+                // clearly visible against the pure-black chat background.
+                Rectangle()
+                    .fill(Color.white.opacity(0.22))
+                    .frame(height: 1)
+            }
 
-                    ForEach(self.history.reversed()) { item in
-                        MessageItemView(item: item, sessionID: self.sessionID)
-                            .padding(.horizontal, 16)
-                            .scaleEffect(x: 1, y: -1)
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .scale(scale: 0.98)),
-                                removal: .opacity,
-                            ))
-                    }
-
-                    // Invisible anchor at top (last due to flip)
-                    Color.clear
-                        .frame(height: 1)
-                        .id("top")
-                }
-                .padding(.top, 20)
-                .padding(.bottom, 20)
-                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: self.isProcessing)
-                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: self.history.count)
-            }
-            .scaleEffect(x: 1, y: -1)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                // Check if we're near the top of the content (which is bottom in inverted view)
-                // contentOffset.y near 0 means at bottom, larger means scrolled up
-                geometry.contentOffset.y < 50
-            } action: { wasAtBottom, isNowAtBottom in
-                if wasAtBottom && !isNowAtBottom {
-                    // User scrolled away from bottom
-                    self.pauseAutoscroll()
-                } else if !wasAtBottom && isNowAtBottom && self.isAutoscrollPaused {
-                    // User scrolled back to bottom
-                    self.resumeAutoscroll()
-                }
-            }
-            .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
-                let maxOffset = geometry.contentSize.height - geometry.containerSize.height
-                let fraction = maxOffset > 0
-                    ? min(1, max(0, geometry.contentOffset.y / maxOffset)) : 0
-                let visible = geometry.contentSize.height > 0
-                    ? min(1, geometry.containerSize.height / geometry.contentSize.height) : 1
-                return ScrollMetrics(fraction: fraction, visible: visible)
-            } action: { _, metrics in
-                // Only update when change exceeds threshold to avoid per-frame SwiftUI re-renders
-                if abs(metrics.fraction - self.scrollFraction) > 0.005 {
-                    self.scrollFraction = metrics.fraction
-                }
-                if abs(metrics.visible - self.visibleFraction) > 0.01 {
-                    self.visibleFraction = metrics.visible
-                }
-            }
-            .onChange(of: self.shouldScrollToBottom) { _, shouldScroll in
-                if shouldScroll {
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        // In inverted scroll, use .bottom anchor to scroll to the visual bottom
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    }
-                    self.shouldScrollToBottom = false
-                    self.resumeAutoscroll()
-                }
-            }
-            .onChange(of: self.viewModel.chatScrollCommand) { _, command in
-                guard let command else { return }
-                self.viewModel.chatScrollCommand = nil
-                self.handleScrollCommand(command, proxy: proxy)
-            }
-            // New messages indicator overlay
-            .overlay(alignment: .bottom) {
-                if self.isAutoscrollPaused && self.newMessageCount > 0 {
-                    NewMessagesIndicator(count: self.newMessageCount) {
-                        withAnimation(.easeOut(duration: 0.3)) {
-                            // In inverted scroll, use .bottom anchor to scroll to the visual bottom
-                            proxy.scrollTo("bottom", anchor: .bottom)
-                        }
-                        self.resumeAutoscroll()
-                    }
-                    .padding(.bottom, 16)
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .bottom)),
-                        removal: .opacity,
-                    ))
-                }
-            }
-            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: self.isAutoscrollPaused && self.newMessageCount > 0)
-            // Mini scrollbar overlay (right edge)
-            .overlay(alignment: .trailing) {
-                if self.isScrollbarVisible && self.visibleFraction < 1 {
-                    MiniScrollbar(fraction: self.scrollFraction, visibleFraction: self.visibleFraction)
-                        .animation(nil, value: self.scrollFraction)
-                        .transition(.opacity)
-                }
-            }
-            .animation(.easeInOut(duration: 0.2), value: self.isScrollbarVisible)
+            // Bottom: current turn (inverted scroll, keeps existing behavior).
+            // When there are previous turns above, the current-turn section is
+            // sized to its natural content height (measured via onGeometryChange),
+            // capped between `currentTurnMinHeight` and `currentTurnMaxRatio * containerH`.
+            // When there are no previous turns, it fills the whole area as before.
+            self.currentTurnList
+                .frame(
+                    maxHeight: self.turnSplit.previous.isEmpty
+                        ? .infinity
+                        : min(
+                            max(self.currentTurnMinHeight, self.currentTurnContentHeight),
+                            max(self.currentTurnMinHeight, self.messageListAvailableHeight * self.currentTurnMaxRatio),
+                        ),
+                )
         }
+        // Read the messageList's available height via a non-greedy background GeometryReader.
+        // Doing this in `.background` is critical: a top-level GeometryReader here would compete
+        // for vertical space with the approval/input bar in the parent VStack and clip the bar
+        // off the bottom of the notch panel (which uses `.frame(maxHeight:, alignment: .top)`).
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .preference(key: MessageListHeightPreferenceKey.self, value: geo.size.height)
+            },
+        )
+        .onPreferenceChange(MessageListHeightPreferenceKey.self) { newHeight in
+            if abs(newHeight - self.messageListAvailableHeight) > 0.5 {
+                self.messageListAvailableHeight = newHeight
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: self.turnSplit.previous.isEmpty)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: self.currentTurnContentHeight)
     }
 
     private var inputBar: some View {
@@ -547,6 +530,175 @@ struct ChatView: View {
         ) { self.focusTerminal() }
     }
 
+    /// Natural chronological scroll of previous-turn items.
+    /// Uses `defaultScrollAnchor(.bottom)` so when previous turns overflow the
+    /// upper area, the most recent (closest to current turn) is visible against
+    /// the divider, and the user scrolls up for older turns.
+    private var previousTurnsList: some View {
+        let items = self.turnSplit.previous
+        return ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(spacing: 16) {
+                ForEach(items) { item in
+                    MessageItemView(item: item, sessionID: self.sessionID)
+                        .padding(.horizontal, 16)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.98)),
+                            removal: .opacity,
+                        ))
+                }
+            }
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: items.count)
+        }
+        .defaultScrollAnchor(.bottom)
+    }
+
+    /// Inverted scroll view for the current (active) turn.
+    /// Preserves all the existing interactive features: autoscroll pause detection,
+    /// mini scrollbar, new-messages indicator, keyboard scroll commands, and
+    /// the `.scaleEffect(x: 1, y: -1)` trick that keeps new messages pinned to the bottom.
+    ///
+    /// Implemented as a computed property (not a func) because SwiftLint's
+    /// `function_body_length` rule applies to `func` declarations only — the body
+    /// here is intentionally long because it chains many scroll-related modifiers
+    /// that all need access to the same `ScrollViewReader` proxy.
+    private var currentTurnList: some View {
+        let items = self.turnSplit.current
+        return ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                self.currentTurnContent(items: items)
+            }
+            .scaleEffect(x: 1, y: -1)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                // Check if we're near the top of the content (which is bottom in inverted view)
+                // contentOffset.y near 0 means at bottom, larger means scrolled up
+                geometry.contentOffset.y < 50
+            } action: { wasAtBottom, isNowAtBottom in
+                if wasAtBottom && !isNowAtBottom {
+                    // User scrolled away from bottom
+                    self.pauseAutoscroll()
+                } else if !wasAtBottom && isNowAtBottom && self.isAutoscrollPaused {
+                    // User scrolled back to bottom
+                    self.resumeAutoscroll()
+                }
+            }
+            .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
+                let maxOffset = geometry.contentSize.height - geometry.containerSize.height
+                let fraction = maxOffset > 0
+                    ? min(1, max(0, geometry.contentOffset.y / maxOffset)) : 0
+                let visible = geometry.contentSize.height > 0
+                    ? min(1, geometry.containerSize.height / geometry.contentSize.height) : 1
+                return ScrollMetrics(fraction: fraction, visible: visible)
+            } action: { _, metrics in
+                // Only update when change exceeds threshold to avoid per-frame SwiftUI re-renders
+                if abs(metrics.fraction - self.scrollFraction) > 0.005 {
+                    self.scrollFraction = metrics.fraction
+                }
+                if abs(metrics.visible - self.visibleFraction) > 0.01 {
+                    self.visibleFraction = metrics.visible
+                }
+            }
+            .onChange(of: self.shouldScrollToBottom) { _, shouldScroll in
+                if shouldScroll {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        // In inverted scroll, use .bottom anchor to scroll to the visual bottom
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                    self.shouldScrollToBottom = false
+                    self.resumeAutoscroll()
+                }
+            }
+            .onChange(of: self.viewModel.chatScrollCommand) { _, command in
+                guard let command else { return }
+                self.viewModel.chatScrollCommand = nil
+                self.handleScrollCommand(command, proxy: proxy)
+            }
+            // New messages indicator overlay
+            .overlay(alignment: .bottom) {
+                if self.isAutoscrollPaused && self.newMessageCount > 0 {
+                    NewMessagesIndicator(count: self.newMessageCount) {
+                        withAnimation(.easeOut(duration: 0.3)) {
+                            // In inverted scroll, use .bottom anchor to scroll to the visual bottom
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                        self.resumeAutoscroll()
+                    }
+                    .padding(.bottom, 16)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .bottom)),
+                        removal: .opacity,
+                    ))
+                }
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: self.isAutoscrollPaused && self.newMessageCount > 0)
+            // Mini scrollbar overlay (right edge)
+            .overlay(alignment: .trailing) {
+                if self.isScrollbarVisible && self.visibleFraction < 1 {
+                    MiniScrollbar(fraction: self.scrollFraction, visibleFraction: self.visibleFraction)
+                        .animation(nil, value: self.scrollFraction)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: self.isScrollbarVisible)
+        }
+    }
+
+    /// Inner LazyVStack for the current-turn inverted scroll.
+    /// Extracted from `currentTurnList` to keep each function under the 100-line
+    /// body-length limit. Iterates `items` in reverse because the container is
+    /// vertically flipped via `.scaleEffect(y: -1)`, so LazyVStack order is
+    /// visually bottom-to-top; each item flips itself back individually.
+    private func currentTurnContent(items: [ChatHistoryItem]) -> some View {
+        LazyVStack(spacing: 16) {
+            // Invisible anchor at bottom (first due to flip)
+            Color.clear
+                .frame(height: 1)
+                .id("bottom")
+
+            // Processing indicator at bottom (first due to flip)
+            if self.isProcessing {
+                ProcessingIndicatorView(turnID: self.lastUserMessageID)
+                    .padding(.horizontal, 16)
+                    .scaleEffect(x: 1, y: -1)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .scale(scale: 0.95)).combined(with: .offset(y: -4)),
+                        removal: .opacity,
+                    ))
+            }
+
+            ForEach(items.reversed()) { item in
+                MessageItemView(item: item, sessionID: self.sessionID)
+                    .padding(.horizontal, 16)
+                    .scaleEffect(x: 1, y: -1)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .scale(scale: 0.98)),
+                        removal: .opacity,
+                    ))
+            }
+
+            // Invisible anchor at top (last due to flip)
+            Color.clear
+                .frame(height: 1)
+                .id("top")
+        }
+        .padding(.top, 20)
+        .padding(.bottom, 20)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: self.isProcessing)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: items.count)
+        .background(NSScrollViewIdentifierTagger(identifier: Self.currentTurnScrollViewID))
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { newHeight in
+            // Track the natural (intrinsic) height of the current-turn content
+            // so the parent `messageList` can shrink this section to fit.
+            if abs(newHeight - self.currentTurnContentHeight) > 0.5 {
+                self.currentTurnContentHeight = newHeight
+            }
+        }
+    }
+
     // MARK: - Image Preview
 
     private func imagePreview(image: NSImage) -> some View {
@@ -595,13 +747,20 @@ struct ChatView: View {
 
     // MARK: - Keyboard Scroll Commands
 
+    /// Look up the tagged current-turn NSScrollView in the key window.
+    /// Returns nil if the chat view is not the current window content or if
+    /// the tagger has not yet attached (should normally be available after first layout).
+    private func currentTurnNSScrollView() -> NSScrollView? {
+        NSApp.keyWindow?.contentView?.findScrollView(identifier: Self.currentTurnScrollViewID)
+    }
+
     private func handleScrollCommand(_ command: ChatScrollCommand, proxy: ScrollViewProxy) {
         self.showScrollbar()
         switch command {
         case .stepUp,
              .stepDown:
             // Step scroll via NSScrollView (inverted view: directions are flipped)
-            guard let scrollView = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self),
+            guard let scrollView = self.currentTurnNSScrollView(),
                   let documentView = scrollView.documentView
             else { return }
             let scrollAmount: CGFloat = 80
@@ -616,7 +775,7 @@ struct ChatView: View {
             // Jump to newest messages: in inverted view, offset 0 = visual bottom.
             // Use proxy first to force LazyVStack to load, then NSScrollView for exact position.
             proxy.scrollTo("bottom")
-            if let sv = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self) {
+            if let sv = self.currentTurnNSScrollView() {
                 sv.contentView.setBoundsOrigin(.zero)
                 sv.reflectScrolledClipView(sv.contentView)
             }
@@ -632,7 +791,7 @@ struct ChatView: View {
                 // Wait for LazyVStack to finish layout after proxy.scrollTo
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled else { return }
-                if let sv = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self),
+                if let sv = self.currentTurnNSScrollView(),
                    let doc = sv.documentView {
                     let maxY = doc.frame.height - sv.contentView.bounds.height
                     sv.contentView.setBoundsOrigin(NSPoint(x: 0, y: max(0, maxY)))
@@ -647,9 +806,13 @@ struct ChatView: View {
     }
 
     /// Jump to the next or previous user message relative to current scroll position.
-    /// Uses the tracked visible message index for efficient navigation.
+    /// Scoped to the current turn only (the bottom, inverted scroll view). Since the
+    /// current turn typically has a single user message, this effectively scrolls to
+    /// the start of the current turn — the previous-turns section above has its own
+    /// independent scroll and is not affected by these keyboard commands.
     private func jumpToUserMessage(direction: JumpDirection, proxy: ScrollViewProxy) {
-        let userItems = self.history.enumerated().filter {
+        let currentItems = self.turnSplit.current
+        let userItems = currentItems.enumerated().filter {
             if case .user = $0.element.type { return true }
             return false
         }
@@ -657,7 +820,7 @@ struct ChatView: View {
 
         // Find current scroll position by checking NSScrollView offset
         let currentFraction: CGFloat
-        if let scrollView = NSApp.keyWindow?.contentView?.findDescendant(ofType: NSScrollView.self),
+        if let scrollView = self.currentTurnNSScrollView(),
            let documentView = scrollView.documentView {
             let clipView = scrollView.contentView
             let maxOffset = documentView.frame.height - clipView.bounds.height
@@ -667,16 +830,16 @@ struct ChatView: View {
             currentFraction = 0
         }
 
-        // Estimate which history index we're near (0 = newest, count-1 = oldest)
+        // Estimate which current-turn index we're near (0 = newest, count-1 = oldest)
         // In inverted view: fraction 0 = newest, fraction 1 = oldest
-        let estimatedIndex = Int(currentFraction * CGFloat(self.history.count - 1))
+        let estimatedIndex = Int(currentFraction * CGFloat(max(1, currentItems.count - 1)))
 
         let targetItem: (offset: Int, element: ChatHistoryItem)? = switch direction {
         case .next:
-            // Next = newer = lower index in history array
+            // Next = newer = lower index in current-turn array
             userItems.last { $0.offset < estimatedIndex }
         case .previous:
-            // Previous = older = higher index in history array
+            // Previous = older = higher index in current-turn array
             userItems.first { $0.offset > estimatedIndex }
         }
 
@@ -1685,5 +1848,78 @@ extension NSView {
             if let match = child.findDescendant(ofType: T.self) { return match }
         }
         return nil
+    }
+
+    /// Recursively find the first NSScrollView descendant with a matching identifier.
+    /// Used by `ChatView` to target the current-turn scroll view specifically, now
+    /// that the chat layout may host two NSScrollViews (previous turns + current turn).
+    func findScrollView(identifier: NSUserInterfaceItemIdentifier) -> NSScrollView? {
+        if let sv = self as? NSScrollView, sv.identifier == identifier { return sv }
+        for child in self.subviews {
+            if let match = child.findScrollView(identifier: identifier) { return match }
+        }
+        return nil
+    }
+}
+
+// MARK: - NSScrollViewIdentifierTagger
+
+/// Tags the enclosing `NSScrollView` with a stable identifier so the keyboard scroll
+/// handler in `ChatView` can locate it unambiguously even when multiple NSScrollViews
+/// exist in the window (previous-turns list + current-turn list).
+///
+/// Place this as a `.background { ... }` inside the target scroll view's content.
+/// On first `viewDidMoveToWindow`, it walks up to find the enclosing NSScrollView and
+/// assigns the requested identifier.
+struct NSScrollViewIdentifierTagger: NSViewRepresentable {
+    // MARK: Internal
+
+    let identifier: NSUserInterfaceItemIdentifier
+
+    func makeNSView(context _: Context) -> NSView {
+        TagView(identifier: self.identifier)
+    }
+
+    func updateNSView(_: NSView, context _: Context) {}
+
+    // MARK: Private
+
+    private final class TagView: NSView {
+        // MARK: Lifecycle
+
+        init(identifier: NSUserInterfaceItemIdentifier) {
+            self.targetIdentifier = identifier
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder _: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        // MARK: Internal
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            self.enclosingScrollView?.identifier = self.targetIdentifier
+        }
+
+        // MARK: Private
+
+        private let targetIdentifier: NSUserInterfaceItemIdentifier
+    }
+}
+
+// MARK: - MessageListHeightPreferenceKey
+
+/// Carries the messageList container's measured height up the view tree without
+/// influencing layout. Set inside a `.background { GeometryReader }` and consumed
+/// via `.onPreferenceChange` so the current-turn cap can be expressed as a fraction
+/// of the available message-list height.
+private struct MessageListHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }

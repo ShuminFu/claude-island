@@ -574,6 +574,7 @@ struct IconButton: View {
                     RoundedRectangle(cornerRadius: 6)
                         .fill(self.isHovered ? Color.white.opacity(0.1) : Color.clear),
                 )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { self.isHovered = $0 }

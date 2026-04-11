@@ -34,6 +34,7 @@ struct ActionButton: View {
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(self.color.opacity(0.3), lineWidth: 1),
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { self.isHovered = $0 }

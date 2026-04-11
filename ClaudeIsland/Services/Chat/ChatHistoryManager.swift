@@ -93,11 +93,15 @@ final class ChatHistoryManager {
             let filteredItems = self.filterOutSubagentTools(session.chatItems)
             newHistories[session.sessionID] = filteredItems
             newAgentDescriptions[session.sessionID] = session.subagentState.agentDescriptions
-            // Only mark as loaded when chatItems are populated (from file sync or history load).
-            // Prevents ChatView from skipping loadFromFile when session exists but JSONL hasn't been parsed yet.
-            if !filteredItems.isEmpty {
-                self.loadedSessions.insert(session.sessionID)
-            }
+            // NOTE: do NOT auto-mark the session as loaded here. `loadedSessions`
+            // has a single meaning — "parseFullConversation has been invoked for
+            // this sessionID" — and must only be written by `loadFromFile`.
+            // Previously this branch conflated "chatItems is non-empty" (which can
+            // happen from a handful of hook-delivered events) with "full JSONL
+            // history has been parsed". That caused ChatView to skip the file
+            // load and only show the 1–2 items that hook events had delivered,
+            // hiding dozens of earlier messages. Keep the flag source-of-truth
+            // in `loadFromFile` so the guard there is the only authority.
         }
         self.histories = newHistories
         self.agentDescriptions = newAgentDescriptions

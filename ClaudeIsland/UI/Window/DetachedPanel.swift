@@ -21,15 +21,25 @@ import SwiftUI
 /// install a tracking area and proactively promote the panel to key as soon as
 /// the cursor enters its bounds, so by the time the user clicks the panel is
 /// already key and the click reaches SwiftUI gestures normally.
+///
+/// IMPORTANT: only remove *our own* tracking area in `updateTrackingAreas`. The
+/// superclass (`NSHostingView`) installs its own tracking areas on self to
+/// deliver SwiftUI `.onHover` events into the view tree. Blindly removing every
+/// entry in `self.trackingAreas` kills those hover dispatchers, which manifests
+/// as "rows stop highlighting after the detached panel resizes" — e.g. after
+/// toggling the menu or opening a chat, `updateTrackingAreas` fires on the
+/// frame change and nukes SwiftUI's freshly-installed hover areas.
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    // MARK: Internal
+
     override func acceptsFirstMouse(for _: NSEvent?) -> Bool {
         true
     }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in self.trackingAreas {
-            self.removeTrackingArea(area)
+        if let existing = self.keyPromotionArea {
+            self.removeTrackingArea(existing)
         }
         let area = NSTrackingArea(
             rect: self.bounds,
@@ -38,6 +48,7 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
             userInfo: nil,
         )
         self.addTrackingArea(area)
+        self.keyPromotionArea = area
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -46,6 +57,10 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
             window.makeKey()
         }
     }
+
+    // MARK: Private
+
+    private var keyPromotionArea: NSTrackingArea?
 }
 
 // MARK: - DetachedPanel

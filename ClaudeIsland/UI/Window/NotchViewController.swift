@@ -50,6 +50,17 @@ class NotchViewController: NSViewController {
             let vm = self.viewModel
             let geometry = vm.geometry
 
+            // When the notch is detached (or being dragged out), the floating
+            // DetachedPanel owns all hit-testing. Return an empty rect so the
+            // docked hosting view passes every click straight through to the
+            // window behind it — otherwise the rectangle directly under the
+            // notch (the would-be opened panel area) silently swallows clicks
+            // even when `ignoresMouseEvents` is enabled, because the SwiftUI
+            // view tree is still hit-testable at opacity 0.
+            guard vm.windowMode == .docked else {
+                return .zero
+            }
+
             // Window coordinates: origin at bottom-left, Y increases upward
             // The window is positioned at top of screen, so panel is at top of window
             let windowHeight = geometry.windowHeight

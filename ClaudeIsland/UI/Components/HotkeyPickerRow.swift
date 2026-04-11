@@ -55,6 +55,7 @@ struct HotkeyPickerRow: View {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(self.isHovered || self.isExpanded ? Color.white.opacity(0.08) : Color.clear),
                 )
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { self.isHovered = $0 }
@@ -72,6 +73,7 @@ struct HotkeyPickerRow: View {
                     .controlSize(.mini)
                     .onChange(of: self.hotkeyEnabled) { _, newValue in
                         AppSettings.globalHotkeyEnabled = newValue
+                        self.hotkeyManager.refresh()
                     }
 
                     if self.hotkeyEnabled {
@@ -126,6 +128,7 @@ struct HotkeyPickerRow: View {
                                 Button("Reset") {
                                     self.currentShortcut = .default
                                     AppSettings.globalHotkey = .default
+                                    self.hotkeyManager.refresh()
                                 }
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.white.opacity(0.5))

@@ -279,6 +279,7 @@ struct UpdateRow: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(self.isHovered && self.isInteractive ? Color.white.opacity(0.08) : Color.clear),
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!self.isInteractive)
@@ -539,6 +540,7 @@ struct AccessibilityRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(self.isHovered ? Color.white.opacity(0.08) : Color.clear),
         )
+        .contentShape(Rectangle())
         .onHover { self.isHovered = $0 }
     }
 
@@ -588,6 +590,7 @@ struct MenuRow: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(self.isHovered ? Color.white.opacity(0.08) : Color.clear),
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { self.isHovered = $0 }
@@ -643,6 +646,7 @@ struct MenuToggleRow: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(self.isHovered ? Color.white.opacity(0.08) : Color.clear),
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { self.isHovered = $0 }
@@ -710,6 +714,7 @@ struct TokenTrackingRow: View {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(self.isHovered || self.isExpanded ? Color.white.opacity(0.08) : Color.clear),
                 )
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { self.isHovered = $0 }
@@ -882,6 +887,7 @@ struct NavigationStyleRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(self.isHovered ? Color.white.opacity(0.08) : Color.clear),
         )
+        .contentShape(Rectangle())
         .onHover { self.isHovered = $0 }
     }
 

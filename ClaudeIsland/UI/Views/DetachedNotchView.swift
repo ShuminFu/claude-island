@@ -17,10 +17,12 @@ struct DetachedNotchView: View {
 
     init(
         viewModel: NotchViewModel,
+        currentPanelOrigin: @escaping () -> CGPoint?,
         onDrag: @escaping (CGPoint) -> Void,
         onDragEnd: @escaping (CGPoint) -> Void,
     ) {
         self.viewModel = viewModel
+        self.currentPanelOrigin = currentPanelOrigin
         self.onDrag = onDrag
         self.onDragEnd = onDragEnd
     }
@@ -35,6 +37,7 @@ struct DetachedNotchView: View {
     static let headerHeight: CGFloat = 32
 
     var viewModel: NotchViewModel
+    let currentPanelOrigin: () -> CGPoint?
     let onDrag: (CGPoint) -> Void
     let onDragEnd: (CGPoint) -> Void
 
@@ -63,8 +66,20 @@ struct DetachedNotchView: View {
                     .padding(.horizontal, 12)
             }
             .frame(height: Self.headerHeight)
+            // Solid background + zIndex keeps the header visually on top of the
+            // content layer during resize animations. When `openedSize` changes,
+            // the outer VStack height animates while the content view's natural
+            // size updates instantly, leaving a brief window where content can
+            // bleed up into the header row. The opaque header hides that
+            // overflow — unlike the previous `.frame(maxHeight: .infinity).clipped()`
+            // wrapper on the content, which swallowed row clicks after the first
+            // resize because it inserted a fill-the-slot layout layer in between.
+            .background(Color.black)
+            .zIndex(1)
 
-            // Main content
+            // Main content at its natural size. No surrounding fill-the-slot
+            // frame or `.clipped()` — those broke hit-testing on rows after a
+            // resize animation.
             self.contentView
                 .frame(width: self.viewModel.openedSize.width - 24)
                 .padding(.bottom, 12)
@@ -104,9 +119,14 @@ struct DetachedNotchView: View {
             .onChanged { _ in
                 let mouseLocation = NSEvent.mouseLocation
                 if self.dragStartOrigin == nil {
-                    // Capture the panel's starting origin and the mouse anchor on the
-                    // first event of the drag, then wait for actual movement.
-                    self.dragStartOrigin = self.viewModel.detachedOrigin
+                    // Anchor from the panel's *actual* current frame origin, not
+                    // the view model's `detachedOrigin`. During a content-type
+                    // resize, `resizeDetachedPanelForContentType` sets
+                    // `detachedOrigin` to the animation's target origin
+                    // immediately while the NSPanel itself is still interpolating
+                    // toward it. Using the target would teleport the panel by the
+                    // remaining animation distance on the first mouse-move event.
+                    self.dragStartOrigin = self.currentPanelOrigin() ?? self.viewModel.detachedOrigin
                     self.dragStartMouse = mouseLocation
                     return
                 }
@@ -197,5 +217,12 @@ struct DetachedNotchView: View {
                 )
             }
         }
+        // Disable the default cross-fade transition between content types. Without
+        // this, SwiftUI keeps the outgoing view (e.g. ChatView or ClaudeInstancesView)
+        // rendered at its previous layout position during the withAnimation resize,
+        // which visually bleeds ghost content through the transparent header row and
+        // looks like content "sliding down from the top". Only the outer frame
+        // resize stays animated; the content switch itself is instant.
+        .animation(nil, value: self.viewModel.contentType)
     }
 }

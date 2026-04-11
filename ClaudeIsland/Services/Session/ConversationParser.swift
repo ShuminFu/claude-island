@@ -510,11 +510,44 @@ actor ConversationParser {
     private func resolveActiveChain(lastUUID: String, parentMap: [String: String]) -> Set<String> {
         var activeIDs = Set<String>()
         var current: String? = lastUUID
-        while let uuid = current {
-            activeIDs.insert(uuid)
+        // Guard against cycles in case a malformed JSONL produces one.
+        var steps = 0
+        let maxSteps = parentMap.count + 2
+        while let uuid = current, steps < maxSteps {
+            if !activeIDs.insert(uuid).inserted { break }
             current = parentMap[uuid]
+            steps += 1
         }
         return activeIDs
+    }
+
+    /// Fast string-based extraction of `uuid` and optional `parentUuid` from a
+    /// JSONL line, skipping `JSONSerialization` overhead. Used to populate
+    /// `parentMap` for every message line — including types we don't persist
+    /// (`attachment`, `system`, `file-history-snapshot`, `queue-operation`) —
+    /// so the active-chain walk can traverse through them instead of terminating
+    /// at the first non-user/assistant ancestor.
+    ///
+    /// Returns `nil` when the line has no `uuid` field. `parentUUID` is `nil`
+    /// when the field is missing, explicitly `null`, or an empty string.
+    nonisolated private static func extractUUIDAndParent(from line: String) -> (uuid: String, parentUUID: String?)? {
+        guard let uuidRange = line.range(of: "\"uuid\":\"") else { return nil }
+        let uuidStart = uuidRange.upperBound
+        guard let uuidEnd = line[uuidStart...].firstIndex(of: "\"") else { return nil }
+        let uuid = String(line[uuidStart..<uuidEnd])
+        guard !uuid.isEmpty else { return nil }
+
+        var parentUUID: String?
+        if let pRange = line.range(of: "\"parentUuid\":\"") {
+            let pStart = pRange.upperBound
+            if let pEnd = line[pStart...].firstIndex(of: "\""), pStart < pEnd {
+                let candidate = String(line[pStart..<pEnd])
+                if !candidate.isEmpty {
+                    parentUUID = candidate
+                }
+            }
+        }
+        return (uuid, parentUUID)
     }
 
     /// Parse JSONL content
@@ -704,6 +737,22 @@ actor ConversationParser {
                     Self.logger.debug("/clear detected (new), will notify UI")
                 }
                 continue
+            }
+
+            // Track parent chain for EVERY message type, not just user/assistant.
+            // The conversation tree weaves through `attachment`, `system`,
+            // `file-history-snapshot`, `queue-operation`, etc., and the
+            // active-chain walk used by /rewind detection has to traverse
+            // through them. Without this, the walk terminates at the first
+            // non-user/assistant ancestor and the parser misreports a rewind,
+            // silently truncating the chat history to 1–3 messages.
+            // Cheap substring check first to avoid the String allocation on
+            // lines that don't carry a uuid field at all.
+            if line.contains("\"uuid\":\""),
+               let pair = Self.extractUUIDAndParent(from: String(line)) {
+                if let parentUUID = pair.parentUUID {
+                    state.parentMap[pair.uuid] = parentUUID
+                }
             }
 
             // Only convert to String when we need to parse JSON (deferred allocation)

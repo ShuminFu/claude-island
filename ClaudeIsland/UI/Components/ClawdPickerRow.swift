@@ -48,6 +48,7 @@ struct ClawdPickerRow: View {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(self.isHovered ? Color.white.opacity(0.08) : Color.clear),
                 )
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { self.isHovered = $0 }
@@ -115,6 +116,7 @@ struct ClawdPickerRow: View {
                             RoundedRectangle(cornerRadius: 6)
                                 .fill(self.isAlwaysVisibleHovered ? Color.white.opacity(0.06) : Color.clear),
                         )
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .onHover { self.isAlwaysVisibleHovered = $0 }

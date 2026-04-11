@@ -174,21 +174,19 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
             return summary
         }
 
-        let prefix: String
-        if let latest = self.conversationInfo.lastUserMessage {
-            prefix = latest.count > 30 ? String(latest.prefix(30)) + "..." : latest
+        let prefix: String = if let latest = self.conversationInfo.lastUserMessage {
+            latest.count > 30 ? String(latest.prefix(30)) + "..." : latest
         } else if let first = self.conversationInfo.firstUserMessage {
-            prefix = first.count > 30 ? String(first.prefix(30)) + "..." : first
+            first.count > 30 ? String(first.prefix(30)) + "..." : first
         } else {
-            prefix = self.projectName
+            self.projectName
         }
 
         if let toolName = self.conversationInfo.lastToolName {
-            let lastPart: String
-            if let last = self.conversationInfo.lastMessage {
-                lastPart = last.count > 40 ? String(last.prefix(40)) + "..." : last
+            let lastPart: String = if let last = self.conversationInfo.lastMessage {
+                last.count > 40 ? String(last.prefix(40)) + "..." : last
             } else {
-                lastPart = ""
+                ""
             }
             if lastPart.isEmpty {
                 return "\(prefix) → \(toolName)"
@@ -277,6 +275,8 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
         self.phase.needsAttention
     }
 
+    // MARK: Private
+
     // MARK: - Smart Summary Helpers
 
     /// Emergency fallback: read JSONL directly without going through ConversationParser
@@ -288,7 +288,7 @@ nonisolated struct SessionState: Equatable, Identifiable, Sendable {
             let projectDir = searchCwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
             let path = projectsDir + "/" + projectDir + "/" + sessionID + ".jsonl"
             if FileManager.default.fileExists(atPath: path) {
-                return parseFirstUserMessage(from: path)
+                return self.parseFirstUserMessage(from: path)
             }
             searchCwd = (searchCwd as NSString).deletingLastPathComponent
         }

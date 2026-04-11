@@ -156,7 +156,7 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(self.isSelected ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1),
         )
-        .onHover { hovering in
+        .onAlwaysActiveHover { hovering in
             self.isHovered = hovering
             if hovering {
                 self.onHoverStart?()
@@ -647,6 +647,76 @@ extension View {
         overlay {
             RightClickDetector(action: action)
         }
+    }
+
+    /// Like SwiftUI's `.onHover`, but uses an `.activeAlways` AppKit tracking area
+    /// so events fire even when the host app is not active. Required for the
+    /// detached panel: SwiftUI's `.onHover` only fires when the panel's app is the
+    /// active app, so hover highlight + auto-mark-as-read break when the user is
+    /// working in another app.
+    func onAlwaysActiveHover(_ action: @escaping (Bool) -> Void) -> some View {
+        background(AlwaysActiveHoverDetector(onChange: action))
+    }
+}
+
+// MARK: - AlwaysActiveHoverDetector
+
+struct AlwaysActiveHoverDetector: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context _: Context) -> AlwaysActiveHoverNSView {
+        AlwaysActiveHoverNSView(onChange: self.onChange)
+    }
+
+    func updateNSView(_ nsView: AlwaysActiveHoverNSView, context _: Context) {
+        nsView.onChange = self.onChange
+    }
+}
+
+// MARK: - AlwaysActiveHoverNSView
+
+final class AlwaysActiveHoverNSView: NSView {
+    // MARK: Lifecycle
+
+    init(onChange: @escaping (Bool) -> Void) {
+        self.onChange = onChange
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    // MARK: Internal
+
+    var onChange: (Bool) -> Void
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in self.trackingAreas {
+            self.removeTrackingArea(area)
+        }
+        let area = NSTrackingArea(
+            rect: self.bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil,
+        )
+        self.addTrackingArea(area)
+    }
+
+    override func mouseEntered(with _: NSEvent) {
+        self.onChange(true)
+    }
+
+    override func mouseExited(with _: NSEvent) {
+        self.onChange(false)
+    }
+
+    // Don't intercept clicks — this is purely a hover detector.
+    override func hitTest(_: NSPoint) -> NSView? {
+        nil
     }
 }
 

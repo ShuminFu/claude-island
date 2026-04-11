@@ -312,18 +312,6 @@ actor ConversationParser {
 
     // MARK: Private
 
-    /// Walk the parentUuid chain backwards from the last message to find all UUIDs on the active branch.
-    /// Messages not in the returned set are on abandoned branches (from /rewind).
-    private func resolveActiveChain(lastUUID: String, parentMap: [String: String]) -> Set<String> {
-        var activeIDs = Set<String>()
-        var current: String? = lastUUID
-        while let uuid = current {
-            activeIDs.insert(uuid)
-            current = parentMap[uuid]
-        }
-        return activeIDs
-    }
-
     private struct CachedInfo {
         let modificationDate: Date
         let info: ConversationInfo
@@ -341,7 +329,7 @@ actor ConversationParser {
         var lastClearOffset: UInt64 = 0 // Offset of last /clear command (0 = none or at start)
         var clearPending = false // True if a /clear was just detected
         // Conversation tree tracking for /rewind support
-        var parentMap: [String: String] = [:] // uuid → parentUuid (conversation tree)
+        var parentMap: [String: String] = [:] // uuid → parentUUID (conversation tree)
         var lastUUID: String? // UUID of the most recently parsed message
         var rewindPending = false // True if a fork was detected (rewind happened)
     }
@@ -515,6 +503,18 @@ actor ConversationParser {
         }
 
         return IncrementalReadResult(content: newContent, newFileSize: fileSize, needsReset: false)
+    }
+
+    /// Walk the parentUUID chain backwards from the last message to find all UUIDs on the active branch.
+    /// Messages not in the returned set are on abandoned branches (from /rewind).
+    private func resolveActiveChain(lastUUID: String, parentMap: [String: String]) -> Set<String> {
+        var activeIDs = Set<String>()
+        var current: String? = lastUUID
+        while let uuid = current {
+            activeIDs.insert(uuid)
+            current = parentMap[uuid]
+        }
+        return activeIDs
     }
 
     /// Parse JSONL content
@@ -765,7 +765,7 @@ actor ConversationParser {
 
         state.lastFileOffset = readResult.newFileSize
 
-        // Detect /rewind: if any new message's parentUuid points to a message that
+        // Detect /rewind: if any new message's parentUUID points to a message that
         // already has a different child in state.messages, a fork occurred.
         // Resolve by filtering to only the active chain (from last message backwards).
         if !state.parentMap.isEmpty, let lastUUID = state.lastUUID {

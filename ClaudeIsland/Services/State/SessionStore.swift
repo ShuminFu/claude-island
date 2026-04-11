@@ -101,7 +101,7 @@ actor SessionStore {
 
         case let .rewindDetected(sessionID, cwd):
             // RewindWatcher fires this event but the actual rewind handling is done
-            // in the parser (parentUuid chain resolution). Just trigger a file sync.
+            // in the parser (parentUUID chain resolution). Just trigger a file sync.
             self.scheduleFileSync(sessionID: sessionID, cwd: cwd)
 
         case let .markAsRead(sessionID):

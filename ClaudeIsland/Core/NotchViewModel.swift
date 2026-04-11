@@ -57,6 +57,15 @@ enum ChatScrollCommand: Equatable {
     case previousUserMessage
 }
 
+// MARK: - WindowMode
+
+/// Window docking mode for the notch panel
+enum WindowMode: Sendable, Equatable {
+    case docked // Anchored in the notch (standard behavior)
+    case detaching // Drag in progress, following mouse
+    case detached // Independent floating window
+}
+
 // MARK: - NotchViewModel
 
 /// State management for the dynamic island notch UI
@@ -84,6 +93,24 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
     var openReason: NotchOpenReason = .unknown
     var contentType: NotchContentType = .instances
     var isHovering = false
+
+    // MARK: - Window Mode State
+
+    /// Current window docking mode
+    var windowMode: WindowMode = .docked {
+        didSet {
+            self.windowModeContinuation?.yield(self.windowMode)
+        }
+    }
+
+    /// Whether the notch panel is locked in the notch (prevents dragging)
+    var isLocked: Bool = AppSettings.isNotchLocked
+
+    /// Whether the detached panel is within the magnetic snap radius
+    var isInSnapZone = false
+
+    /// Screen-coordinate origin for the detached panel during drag
+    var detachedOrigin: CGPoint = .zero
 
     // MARK: - Keyboard Navigation State
 
@@ -192,6 +219,74 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
         return stream
     }
 
+    // MARK: - Window Mode Stream
+
+    /// Create a stream of window mode changes for use in non-SwiftUI contexts (e.g., window controllers).
+    /// Single-consumer: calling again finishes the previous stream.
+    /// Yields the current mode immediately.
+    func makeWindowModeStream() -> AsyncStream<WindowMode> {
+        self.windowModeContinuation?.finish()
+
+        // bufferingNewest(1): only mode transitions (docked/detaching/detached) are consumed here.
+        // Position updates go through @Observable (detachedOrigin) directly, so dropping
+        // intermediate yields is safe.
+        let (stream, continuation) = AsyncStream.makeStream(of: WindowMode.self, bufferingPolicy: .bufferingNewest(1))
+        self.windowModeContinuation = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task(name: "window-mode-stream-cleanup") { @MainActor [weak self] in
+                self?.windowModeContinuation = nil
+            }
+        }
+        continuation.yield(self.windowMode)
+        return stream
+    }
+
+    // MARK: - Lock / Detach
+
+    /// Toggle the lock state and persist to settings
+    func toggleLock() {
+        self.isLocked.toggle()
+        AppSettings.isNotchLocked = self.isLocked
+    }
+
+    /// Begin detaching the panel (drag started past threshold).
+    /// The detached panel starts at the notch's opened panel position.
+    func beginDetach() {
+        guard !self.isLocked, self.status == .opened else { return }
+        let panelRect = self.geometry.openedScreenRect(for: self.openedSize)
+        self.detachedOrigin = panelRect.origin
+        self.windowMode = .detaching
+    }
+
+    /// Update detached panel position during drag
+    func updateDetach(mouseLocation: CGPoint, dragOffset: CGPoint) {
+        guard self.windowMode == .detaching else { return }
+        self.detachedOrigin = CGPoint(
+            x: mouseLocation.x - dragOffset.x,
+            y: mouseLocation.y - dragOffset.y,
+        )
+        self.isInSnapZone = self.geometry.isInSnapZone(mouseLocation)
+    }
+
+    /// End detach: snap back if in snap zone, otherwise finalize detached state
+    func endDetach(mouseLocation: CGPoint) {
+        guard self.windowMode == .detaching else { return }
+        if self.geometry.isInSnapZone(mouseLocation) {
+            self.windowMode = .docked
+            self.isInSnapZone = false
+        } else {
+            self.windowMode = .detached
+            self.isInSnapZone = false
+        }
+    }
+
+    /// Explicitly return to docked mode (e.g., clicking notch while detached)
+    func snapBackToNotch() {
+        guard self.windowMode == .detached || self.windowMode == .detaching else { return }
+        self.isInSnapZone = false
+        self.windowMode = .docked
+    }
+
     /// Reset keyboard selection state
     func resetKeyboardSelection() {
         self.selectedInstanceID = nil
@@ -229,7 +324,7 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
     }
 
     func notchPop() {
-        guard self.status == .closed else { return }
+        guard self.status == .closed, self.windowMode == .docked else { return }
         self.status = .popping
     }
 
@@ -301,6 +396,7 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
 
     /// Perform boot animation: expand briefly then collapse
     func performBootAnimation() {
+        guard self.windowMode == .docked else { return }
         self.notchOpen(reason: .boot)
         self.bootAnimationTask?.cancel()
         self.bootAnimationTask = Task(name: "boot-animation") {
@@ -431,6 +527,7 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
     }
 
     private var statusContinuation: AsyncStream<NotchStatus>.Continuation?
+    private var windowModeContinuation: AsyncStream<WindowMode>.Continuation?
 
     // MARK: - Dependencies
 
@@ -520,6 +617,9 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
     }
 
     private func handleMouseMove(_ location: CGPoint) {
+        // Skip hover-to-open when content is detached or being dragged
+        guard self.windowMode == .docked else { return }
+
         let inNotch = self.geometry.isPointInNotch(location)
         let inOpened = self.status == .opened && self.geometry.isPointInOpenedPanel(location, size: self.openedSize)
 
@@ -560,6 +660,19 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
     private func handleMouseDown() {
         let location = NSEvent.mouseLocation
 
+        // When detached, clicking the notch snaps the panel back.
+        // First click only triggers snap-back; a second click triggers
+        // the normal open/close path once the panel is docked again.
+        if self.windowMode == .detached {
+            if self.geometry.isPointInNotch(location) {
+                self.snapBackToNotch()
+            }
+            return
+        }
+
+        // Skip normal handling during drag
+        guard self.windowMode == .docked else { return }
+
         switch self.status {
         case .opened:
             if self.geometry.isPointOutsidePanel(location, size: self.openedSize) {
@@ -567,8 +680,16 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
                 // Re-post the click so it reaches the window/app behind us
                 self.repostClickAt(location)
             } else if self.geometry.notchScreenRect.contains(location) {
-                // Clicking notch while opened - only close if NOT in chat mode
-                if !self.isInChatMode {
+                // Clicking notch while opened - only close if NOT in chat mode.
+                // When unlocked, the notch area overlaps the drag-to-detach
+                // header, so the async global mouse-down handler was racing
+                // `NotchDragController`'s synchronous tracking: `notchClose()`
+                // could flip `status` to `.closed` before the drag crossed its
+                // 5pt threshold, making `beginDetach()` reject and leaving the
+                // detach flow in a broken state. Skip the auto-close while
+                // unlocked — the user can still close via click-outside,
+                // hotkey, or by dragging out.
+                if !self.isInChatMode, self.isLocked {
                     self.notchClose()
                 }
             }

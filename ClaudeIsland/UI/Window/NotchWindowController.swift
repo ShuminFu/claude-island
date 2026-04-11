@@ -66,54 +66,15 @@ class NotchWindowController: NSWindowController {
         // so interactive content (buttons, scroll views) works.
         notchWindow.ignoresMouseEvents = true
 
-        let statusStream = self.viewModel.makeStatusStream()
-        self.statusTask = Task(name: "notch-status-stream") { @MainActor [weak notchWindow, weak viewModel] in
-            for await status in statusStream {
-                guard let panel = notchWindow else { continue }
-                switch status {
-                case .opened:
-                    // Panel needs to receive mouse events when opened for interactive content
-                    panel.isContentActive = true
-                    panel.ignoresMouseEvents = false
-                    // Don't steal focus when opened by notification or hover.
-                    // makeKey() on a .mainMenu+3 panel can trap the mouse cursor
-                    // because macOS routes all events in the window frame to the key window.
-                    let reason = viewModel?.openReason
-                    if reason == .hotkey {
-                        // Force activation for hotkey opens so local keyboard
-                        // event monitor receives subsequent key events
-                        NSApp.activate()
-                        panel.makeKey()
-                    } else if reason == .click {
-                        panel.makeKey()
-                    }
-                    // hover / notification opens: no makeKey — user can still click
-                    // the panel to give it key status if they need keyboard interaction
-                case .closed,
-                     .popping:
-                    // When closed, ignore mouse events so the transparent window doesn't
-                    // interfere with mouse tracking. Global event monitors handle hover
-                    // detection and click-to-open independently.
-                    panel.isContentActive = false
-                    panel.ignoresMouseEvents = true
-                    panel.resignKey()
-                }
-            }
-        }
-
-        // Perform boot animation after a brief delay (only on initial launch)
-        if animateOnLaunch {
-            self.bootAnimationTask = Task(name: "boot-animation-delay") { [weak self] in
-                try? await Task.sleep(for: .seconds(0.3))
-                guard !Task.isCancelled else { return }
-                self?.viewModel.performBootAnimation()
-            }
-        }
+        self.setupStatusStream(panel: notchWindow, viewModel: self.viewModel)
+        self.setupBootAnimation(animateOnLaunch: animateOnLaunch)
+        self.setupDetachableNotch(viewModel: self.viewModel)
     }
 
     deinit {
         statusTask?.cancel()
         bootAnimationTask?.cancel()
+        windowModeTask?.cancel()
     }
 
     @available(*, unavailable)
@@ -123,13 +84,37 @@ class NotchWindowController: NSWindowController {
 
     // MARK: Internal
 
+    nonisolated static let logger = Logger(subsystem: "com.engels74.ClaudeIsland", category: "NotchWindowController")
+
     let viewModel: NotchViewModel
+    let screen: NSScreen
+
+    // MARK: - Detachable Notch (shared with NotchWindowController+Detach.swift)
+
+    var detachedPanel: DetachedPanel?
+    var detachedHostingView: FirstMouseHostingView<DetachedNotchView>?
+    var dragController: NotchDragController?
+    var windowModeTask: Task<Void, Never>?
+
+    /// Whether the snap-back was triggered by the snap zone (already handled by drag controller)
+    /// vs an explicit action like clicking the notch (needs animated snap-back).
+    var snapBackHandledByDragController = false
+
+    /// Constrain detached panel to screen bounds on screen change
+    func constrainDetachedPanelToScreen() {
+        guard let panel = self.detachedPanel else { return }
+        let screenFrame = self.screen.visibleFrame
+        var frame = panel.frame
+
+        // Ensure at least 50pt of the panel remains on screen
+        frame.origin.x = max(screenFrame.minX - frame.width + 50, min(frame.origin.x, screenFrame.maxX - 50))
+        frame.origin.y = max(screenFrame.minY, min(frame.origin.y, screenFrame.maxY - 50))
+
+        panel.setFrame(frame, display: true)
+    }
 
     // MARK: Private
 
-    nonisolated private static let logger = Logger(subsystem: "com.engels74.ClaudeIsland", category: "NotchGeometry")
-
-    private let screen: NSScreen
     private var statusTask: Task<Void, Never>?
     private var bootAnimationTask: Task<Void, Never>?
 
@@ -146,5 +131,59 @@ class NotchWindowController: NSWindowController {
             ), baseWidth=\(baseWidth, privacy: .public), reservedWidth=\(reservedWidth, privacy: .public)
             """,
         )
+    }
+
+    private func setupStatusStream(panel notchWindow: NotchPanel, viewModel: NotchViewModel) {
+        // Install the drag-header claim hook once — it reads the live view model so it
+        // covers the currently-opened panel rect (content-type toggles resize it).
+        // This prevents NotchPanel.sendEvent from reposting mouseDown events that land
+        // on the rounded-corner cutouts of the NotchShape, which would otherwise warp
+        // the hardware cursor and make drag-to-detach twitch at the very top of the screen.
+        notchWindow.shouldClaimMouseDown = { [weak viewModel] screenLocation in
+            guard let vm = viewModel, vm.status == .opened, vm.windowMode == .docked else {
+                return false
+            }
+            let panelRect = vm.geometry.openedScreenRect(for: vm.openedSize)
+            // Match NotchDragController's drag header rect (top 40pt of the opened panel)
+            // with an inclusive `maxY` check so the very top row of pixels still counts.
+            let headerMinY = panelRect.maxY - 40
+            return screenLocation.x >= panelRect.minX
+                && screenLocation.x <= panelRect.maxX
+                && screenLocation.y >= headerMinY
+                && screenLocation.y <= panelRect.maxY
+        }
+
+        let statusStream = viewModel.makeStatusStream()
+        self.statusTask = Task(name: "notch-status-stream") { @MainActor [weak notchWindow, weak viewModel] in
+            for await status in statusStream {
+                guard let panel = notchWindow else { continue }
+                switch status {
+                case .opened:
+                    panel.isContentActive = true
+                    panel.ignoresMouseEvents = false
+                    let reason = viewModel?.openReason
+                    if reason == .hotkey {
+                        NSApp.activate()
+                        panel.makeKey()
+                    } else if reason == .click {
+                        panel.makeKey()
+                    }
+                case .closed,
+                     .popping:
+                    panel.isContentActive = false
+                    panel.ignoresMouseEvents = true
+                    panel.resignKey()
+                }
+            }
+        }
+    }
+
+    private func setupBootAnimation(animateOnLaunch: Bool) {
+        guard animateOnLaunch else { return }
+        self.bootAnimationTask = Task(name: "boot-animation-delay") { [weak self] in
+            try? await Task.sleep(for: .seconds(0.3))
+            guard !Task.isCancelled else { return }
+            self?.viewModel.performBootAnimation()
+        }
     }
 }

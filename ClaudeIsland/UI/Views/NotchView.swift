@@ -39,7 +39,11 @@ struct NotchView: View {
                 self.notchPanel
             }
         }
-        .opacity(self.isVisible ? 1 : 0)
+        .opacity(self.isVisible && self.viewModel.windowMode == .docked ? 1 : 0)
+        // Crossfade the docked notch against the floating DetachedPanel's alpha
+        // animation so the handoff during drag-to-detach (and snap-back) looks
+        // continuous instead of snapping between two different surfaces.
+        .animation(.easeOut(duration: 0.18), value: self.viewModel.windowMode)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
         .onAppear {
@@ -118,12 +122,6 @@ struct NotchView: View {
     @State private var previousWaitingForInputIDs: Set<String> = []
     @State private var waitingForInputTimestamps: [String: Date] = [:] // sessionID -> when it entered waitingForInput
     @State private var isVisible = false
-    /// Hover state driven by viewModel.isHovering (geometry-based global event monitors).
-    /// Only read when closed — when opened the shadow is always visible, so we avoid
-    /// creating an @Observable dependency that causes needless re-renders during animations.
-    private var showHoverShadow: Bool {
-        self.viewModel.status == .opened || self.viewModel.isHovering
-    }
     @State private var isBouncing = false
     @State private var hideVisibilityTask: Task<Void, Never>?
     @State private var bounceTask: Task<Void, Never>?
@@ -151,6 +149,13 @@ struct NotchView: View {
 
     /// Prefix indicating context was resumed (not a true "done" state)
     private let contextResumePrefix = "This session is being continued from a previous conversation"
+
+    /// Hover state driven by viewModel.isHovering (geometry-based global event monitors).
+    /// Only read when closed — when opened the shadow is always visible, so we avoid
+    /// creating an @Observable dependency that causes needless re-renders during animations.
+    private var showHoverShadow: Bool {
+        self.viewModel.status == .opened || self.viewModel.isHovering
+    }
 
     /// Whether any Claude session is currently processing or compacting
     private var isAnyProcessing: Bool {
@@ -324,6 +329,15 @@ struct NotchView: View {
             .animation(.smooth, value: self.accessibilityManager.shouldShowPermissionWarning)
             .animation(.spring(response: 0.3, dampingFraction: 0.5), value: self.isBouncing)
             .animation(.smooth, value: self.clawdAlwaysVisible)
+            // Snap zone glow: placed after clipShape/frame so blur extends outward
+            .overlay {
+                if self.viewModel.isInSnapZone && self.viewModel.windowMode == .detaching {
+                    self.currentNotchShape
+                        .stroke(Color.white.opacity(0.3), lineWidth: 2)
+                        .blur(radius: 4)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: self.viewModel.isInSnapZone)
             // Hit area for tap gesture only — do NOT add .onHover here.
             // Hover is tracked via viewModel.isHovering (global event monitors with
             // geometry-based bounds checking) to avoid mouse-trapping at screen edges.
@@ -373,6 +387,7 @@ struct NotchView: View {
                             )
                         }
                     }
+                    self.lockToggleButton
                     self.menuToggleButton
                 }
                 .padding(.trailing, ModuleLayoutEngine.outerEdgeInset)
@@ -424,6 +439,22 @@ struct NotchView: View {
             width: self.viewModel.status == .opened ? self.notchSize.width - 24 : nil,
             height: self.closedNotchSize.height,
         )
+    }
+
+    private var lockToggleButton: some View {
+        Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                self.viewModel.toggleLock()
+            }
+        } label: {
+            Image(systemName: self.viewModel.isLocked ? "lock.fill" : "lock.open.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.4))
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(self.viewModel.isLocked ? "Unlock to drag panel" : "Lock panel in notch")
     }
 
     private var menuToggleButton: some View {
@@ -564,9 +595,16 @@ struct NotchView: View {
         let vm = self.viewModel
         let sm = self.sessionMonitor
         self.keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Don't intercept keys while panel is detached or being dragged
+            guard vm.windowMode == .docked else { return event }
             // Don't intercept keys while recording a new hotkey shortcut
             guard !GlobalHotkeyManager.shared.isRecording else { return event }
-            // Don't intercept keys with Command modifier (system shortcuts, Cmd+V in chat)
+            // Cmd+D → toggle detach lock
+            if event.modifierFlags.contains(.command) && event.keyCode == 2 {
+                vm.toggleLock()
+                return nil
+            }
+            // Don't intercept other keys with Command modifier (system shortcuts, Cmd+V in chat)
             if event.modifierFlags.contains(.command) { return event }
 
             // Vim-like modal behavior: check if a text field has focus ("insert mode")
@@ -632,6 +670,7 @@ struct NotchView: View {
         if !newPendingIDs.isEmpty &&
             AppSettings.notchAutoExpand &&
             self.viewModel.status == .closed &&
+            self.viewModel.windowMode == .docked &&
             !TerminalVisibilityDetector.isTerminalVisibleOnCurrentSpace() {
             self.viewModel.notchOpen(reason: .notification)
         }
@@ -712,52 +751,5 @@ struct NotchView: View {
         }
 
         self.previousWaitingForInputIDs = currentIDs
-    }
-
-    /// Determine if notification sound should play for the given sessions
-    /// Returns true if sound should play based on suppression settings
-    private func shouldPlayNotificationSound(for sessions: [SessionState]) async -> Bool {
-        let suppressionMode = AppSettings.soundSuppression
-
-        // If suppression is disabled, always play sound
-        if suppressionMode == .never {
-            return true
-        }
-
-        // Suppress if Claude Island is active
-        if NSApplication.shared.isActive {
-            return false
-        }
-
-        // Check each session against the suppression mode
-        for session in sessions {
-            guard let pid = session.pid else {
-                // No PID means we can't check focus/visibility, assume should play
-                return true
-            }
-
-            switch suppressionMode {
-            case .never:
-                // Already handled above, but included for completeness
-                return true
-
-            case .whenFocused:
-                // Suppress if the session's terminal is focused
-                let isFocused = await TerminalVisibilityDetector.isSessionFocused(sessionPID: pid)
-                if !isFocused {
-                    return true
-                }
-
-            case .whenVisible:
-                // Suppress if the session's terminal window is ≥50% visible
-                let isVisible = await TerminalVisibilityDetector.isSessionTerminalVisible(sessionPID: pid)
-                if !isVisible {
-                    return true
-                }
-            }
-        }
-
-        // All sessions are suppressed
-        return false
     }
 }

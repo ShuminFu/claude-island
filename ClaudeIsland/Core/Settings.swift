@@ -303,11 +303,25 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: Keys.enableTabFlashOnFocus) }
     }
 
+    // MARK: - Notch Lock
+
+    /// Whether the notch panel is locked in position (prevents drag-to-detach)
+    static var isNotchLocked: Bool {
+        get {
+            if defaults.object(forKey: Keys.isNotchLocked) == nil {
+                return true // Default to locked
+            }
+            return defaults.bool(forKey: Keys.isNotchLocked)
+        }
+        set { defaults.set(newValue, forKey: Keys.isNotchLocked) }
+    }
+
     // MARK: Private
 
     // MARK: - Keys
 
     private enum Keys {
+        static let isNotchLocked = "isNotchLocked"
         static let notificationSound = "notificationSound"
         static let soundSuppression = "soundSuppression"
         static let clawdColor = "clawdColor"

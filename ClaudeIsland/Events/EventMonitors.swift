@@ -55,6 +55,21 @@ final class EventMonitors {
         return stream
     }
 
+    /// Create a stream of mouse up events.
+    /// Single-consumer: calling again finishes the previous stream.
+    func makeMouseUpStream() -> AsyncStream<Void> {
+        self.mouseUpContinuation?.finish()
+
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        self.mouseUpContinuation = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task(name: "mouse-up-cleanup") { @MainActor [weak self] in
+                self?.mouseUpContinuation = nil
+            }
+        }
+        return stream
+    }
+
     /// Start event monitors only if accessibility permission is already granted.
     /// Must be called after the user grants Accessibility permission (or on launch if already granted).
     /// Safe to call multiple times — subsequent calls are no-ops.
@@ -73,10 +88,14 @@ final class EventMonitors {
     /// Continuation for mouse down stream
     private var mouseDownContinuation: AsyncStream<Void>.Continuation?
 
+    /// Continuation for mouse up stream
+    private var mouseUpContinuation: AsyncStream<Void>.Continuation?
+
     private var monitorsStarted = false
     private var mouseMoveMonitor: EventMonitor?
     private var mouseDownMonitor: EventMonitor?
     private var mouseDraggedMonitor: EventMonitor?
+    private var mouseUpMonitor: EventMonitor?
 
     private func setupMonitors() {
         // NSEvent monitor handlers are documented to run on the main thread.
@@ -106,5 +125,12 @@ final class EventMonitors {
             }
         }
         self.mouseDraggedMonitor?.start()
+
+        self.mouseUpMonitor = EventMonitor(mask: .leftMouseUp) { [weak self] _ in
+            MainActor.assumeIsolated {
+                _ = self?.mouseUpContinuation?.yield(())
+            }
+        }
+        self.mouseUpMonitor?.start()
     }
 }

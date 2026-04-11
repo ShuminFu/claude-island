@@ -820,7 +820,9 @@ struct ChatView: View {
                     await TerminalFocuser.shared.flashTabTitle(tty: tty, projectName: self.session.projectName)
                 } else {
                     os.Logger(subsystem: "com.engels74.ClaudeIsland", category: "ChatView")
-                        .warning("No TTY available for tab flash (terminalTTY=\(self.session.terminalTTY ?? "nil"), tty=\(self.session.tty ?? "nil"))")
+                        .warning(
+                            "No TTY available for tab flash (terminalTTY=\(self.session.terminalTTY ?? "nil"), tty=\(self.session.tty ?? "nil"))",
+                        )
                 }
             }
         }

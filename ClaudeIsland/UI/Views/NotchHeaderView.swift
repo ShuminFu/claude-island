@@ -353,9 +353,9 @@ struct SessionStateDots: View {
 
 /// A dot with a pulsing outer ring to indicate unread status
 struct UnreadDot: View {
-    let color: Color
+    // MARK: Internal
 
-    @State private var isPulsing = false
+    let color: Color
 
     var body: some View {
         ZStack {
@@ -378,4 +378,8 @@ struct UnreadDot: View {
             }
         }
     }
+
+    // MARK: Private
+
+    @State private var isPulsing = false
 }

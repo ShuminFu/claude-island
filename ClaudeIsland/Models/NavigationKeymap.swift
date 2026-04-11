@@ -42,28 +42,26 @@ enum NavigationStyle: String, CaseIterable, Sendable {
 struct NavigationKeymap: Sendable {
     // MARK: Internal
 
+    /// Build a keymap for the given navigation style
+    static func keymap(for style: NavigationStyle) -> Self {
+        switch style {
+        case .arrows:
+            Self(mapping: self.arrowBindings)
+        case .vim:
+            Self(mapping: self.arrowBindings.merging(self.vimBindings) { _, vim in vim })
+        case .both:
+            Self(mapping: self.arrowBindings.merging(self.vimBindings) { arrow, _ in arrow })
+        }
+    }
+
     /// Resolve a key code to a navigation action, if any
     func action(for keyCode: UInt16) -> NavigationAction? {
         self.mapping[keyCode]
     }
 
-    /// Build a keymap for the given navigation style
-    static func keymap(for style: NavigationStyle) -> Self {
-        switch style {
-        case .arrows:
-            Self(mapping: Self.arrowBindings)
-        case .vim:
-            Self(mapping: Self.arrowBindings.merging(Self.vimBindings) { _, vim in vim })
-        case .both:
-            Self(mapping: Self.arrowBindings.merging(Self.vimBindings) { arrow, _ in arrow })
-        }
-    }
-
     // MARK: Private
 
-    private let mapping: [UInt16: NavigationAction]
-
-    // Arrow key bindings
+    /// Arrow key bindings
     private static let arrowBindings: [UInt16: NavigationAction] = [
         126: .up, // ↑
         125: .down, // ↓
@@ -73,7 +71,7 @@ struct NavigationKeymap: Sendable {
         53: .close, // Escape
     ]
 
-    // Vim key bindings
+    /// Vim key bindings
     private static let vimBindings: [UInt16: NavigationAction] = [
         40: .up, // k
         38: .down, // j
@@ -83,4 +81,6 @@ struct NavigationKeymap: Sendable {
         53: .close, // Escape
         12: .close, // q
     ]
+
+    private let mapping: [UInt16: NavigationAction]
 }

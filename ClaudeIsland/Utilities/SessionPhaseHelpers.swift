@@ -13,6 +13,12 @@ import SwiftUI
 extension [SessionState] {
     /// Sorted by phase priority (active > waitingForInput > idle),
     /// then by last user message date (most recent first).
+    ///
+    /// Special case: `waitingForApproval` items are grouped to the front of their
+    /// priority bucket and sorted by date only (ignoring `hasUnreadUpdate`). This
+    /// keeps the list stable while the user hovers over approval rows — otherwise
+    /// the hover-mark-read feature would push the hovered item behind other unread
+    /// approval items and slide a different row under the cursor.
     func sortedByPriority() -> [SessionState] {
         self.sorted { lhs, rhs in
             let priorityLhs = lhs.phase.sortPriority
@@ -20,8 +26,14 @@ extension [SessionState] {
             if priorityLhs != priorityRhs {
                 return priorityLhs < priorityRhs
             }
-            // Within same priority: unread before read
-            if lhs.hasUnreadUpdate != rhs.hasUnreadUpdate {
+            let lhsApproval = lhs.phase.isWaitingForApproval
+            let rhsApproval = rhs.phase.isWaitingForApproval
+            // Approval items always come before non-approval peers in the same bucket.
+            if lhsApproval != rhsApproval {
+                return lhsApproval
+            }
+            // For non-approval peers, keep the existing unread-first behavior.
+            if !lhsApproval, lhs.hasUnreadUpdate != rhs.hasUnreadUpdate {
                 return lhs.hasUnreadUpdate
             }
             let dateLhs = lhs.lastUserMessageDate ?? lhs.lastActivity

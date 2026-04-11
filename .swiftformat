@@ -66,8 +66,8 @@
 --acronyms ID,URL,UUID,HTTP,HTTPS,JSON,API,UI,MCP,PID,JSONL,SSH,TCP,IP,DNS,HTML,XML,CSS,JS,SDK,CLI,TLS,SSL
 
 # Exclude directories and files
-# Note: HookSocketServer.swift excluded due to organizeDeclarations rule timeout (file too large/complex)
---exclude build,DerivedData,.build,Pods,releases,*.xcodeproj,*.xcworkspace,xcuserdata,.sparkle-keys,ClaudeIsland/Services/Hooks/HookSocketServer.swift
+# Note: HookSocketServer.swift and ClaudeInstancesView+InstanceRow.swift excluded due to organizeDeclarations rule timeout (file too large/complex)
+--exclude build,DerivedData,.build,Pods,releases,*.xcodeproj,*.xcworkspace,xcuserdata,.sparkle-keys,ClaudeIsland/Services/Hooks/HookSocketServer.swift,ClaudeIsland/UI/Views/ClaudeInstancesView+InstanceRow.swift
 
 # Rules to enable
 --enable acronyms

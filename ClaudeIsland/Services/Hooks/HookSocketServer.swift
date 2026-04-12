@@ -417,13 +417,15 @@ final class HookSocketServer: @unchecked Sendable { // swiftlint:disable:this ty
     private let cacheState = Mutex(CacheState())
 
     nonisolated private func startServer(onEvent: @escaping HookEventHandler, onPermissionFailure: PermissionFailureHandler?) {
+        // Always update the event handler so a re-created ClaudeSessionMonitor is
+        // immediately wired up, even when the underlying server socket is already running.
+        eventHandler = onEvent
+        permissionFailureHandler = onPermissionFailure
+
         guard serverSocket < 0 else { return }
 
         // Reset stopped state when explicitly starting
         isStopped = false
-
-        eventHandler = onEvent
-        permissionFailureHandler = onPermissionFailure
 
         attemptServerStart()
     }

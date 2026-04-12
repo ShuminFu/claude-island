@@ -9,7 +9,6 @@
 import AppKit
 import Foundation
 import Observation
-import Synchronization
 
 // MARK: - ClaudeSessionMonitor
 
@@ -44,16 +43,39 @@ final class ClaudeSessionMonitor {
 
     func startMonitoring() {
         HookSocketServer.shared.start(
-            onEvent: { [weak self] event in
-                // HookSocketServer calls this callback on its internal socket queue.
-                // Single MainActor hop handles all event processing.
-                Task(name: "hook-event") { @MainActor [weak self] in
-                    await self?.handleHookEvent(event)
+            onEvent: { event in
+                // Route directly to SessionStore — no [weak self] so this handler
+                // remains valid even if the ClaudeSessionMonitor that called
+                // startMonitoring() is later deallocated (e.g. DetachedNotchView
+                // closing after overwriting the handler registered by NotchView).
+                Task(name: "hook-event") { @MainActor in
+                    await SessionStore.shared.process(.hookReceived(event))
+
+                    // Start/stop interrupt watcher
+                    if event.sessionPhase == .processing {
+                        InterruptWatcherManager.shared.startWatching(
+                            sessionID: event.sessionID,
+                            cwd: event.cwd,
+                        )
+                    }
+                    if event.status == "ended" {
+                        InterruptWatcherManager.shared.stopWatching(sessionID: event.sessionID)
+                    }
+
+                    // Cancel pending permissions when session stops or tool completes
+                    if event.event == "Stop" {
+                        HookSocketServer.shared.cancelPendingPermissions(sessionID: event.sessionID)
+                    }
+                    if event.event == "PostToolUse", let toolUseID = event.toolUseID {
+                        HookSocketServer.shared.cancelPendingPermission(toolUseID: toolUseID)
+                    }
                 }
             },
-            onPermissionFailure: { [weak self] sessionID, toolUseID in
-                Task(name: "permission-failure") { @MainActor [weak self] in
-                    await self?.handlePermissionFailure(sessionID: sessionID, toolUseID: toolUseID)
+            onPermissionFailure: { sessionID, toolUseID in
+                Task(name: "permission-failure") { @MainActor in
+                    await SessionStore.shared.process(
+                        .permissionSocketFailed(sessionID: sessionID, toolUseID: toolUseID),
+                    )
                 }
             },
         )
@@ -67,7 +89,6 @@ final class ClaudeSessionMonitor {
     func stopMonitoring() {
         self.sessionsTask?.cancel()
         self.sessionsTask = nil
-        self.cancelAllTasks()
         HookSocketServer.shared.stop()
 
         // Stop periodic session status check
@@ -139,75 +160,6 @@ final class ClaudeSessionMonitor {
 
     /// Task for sessions stream subscription
     @ObservationIgnored private var sessionsTask: Task<Void, Never>?
-
-    /// Active tasks that should be cancelled when monitoring stops
-    /// Uses Mutex for thread-safe access per Swift 6 patterns
-    @ObservationIgnored private let activeTasks = Mutex<[UUID: Task<Void, Never>]>([:])
-
-    /// Handle hook event - unified async handler to reduce executor hops
-    private func handleHookEvent(_ event: HookEvent) async {
-        // Process the hook event (hops to SessionStore actor)
-        let task = Task(name: "process-hook-event") {
-            await SessionStore.shared.process(.hookReceived(event))
-        }
-        self.trackTask(task)
-
-        // Start/stop interrupt watcher (already on MainActor - no Task needed)
-        if event.sessionPhase == .processing {
-            InterruptWatcherManager.shared.startWatching(
-                sessionID: event.sessionID,
-                cwd: event.cwd,
-            )
-        }
-
-        if event.status == "ended" {
-            InterruptWatcherManager.shared.stopWatching(sessionID: event.sessionID)
-        }
-
-        // Cancel pending permissions (nonisolated - no hop needed)
-        if event.event == "Stop" {
-            HookSocketServer.shared.cancelPendingPermissions(sessionID: event.sessionID)
-        }
-
-        if event.event == "PostToolUse", let toolUseID = event.toolUseID {
-            HookSocketServer.shared.cancelPendingPermission(toolUseID: toolUseID)
-        }
-    }
-
-    /// Handle permission socket failure - unified async handler
-    private func handlePermissionFailure(sessionID: String, toolUseID: String) async {
-        let task = Task(name: "process-permission-failure") {
-            await SessionStore.shared.process(
-                .permissionSocketFailed(sessionID: sessionID, toolUseID: toolUseID),
-            )
-        }
-        self.trackTask(task)
-    }
-
-    /// Track a task for cancellation on stop
-    private func trackTask(_ task: Task<Void, Never>) {
-        let id = UUID()
-        self.activeTasks.withLock { $0[id] = task }
-
-        // Auto-remove when task completes
-        Task(name: "task-cleanup") {
-            _ = await task.result
-            _ = self.activeTasks.withLock { $0.removeValue(forKey: id) }
-        }
-    }
-
-    /// Cancel all tracked tasks
-    private func cancelAllTasks() {
-        let tasks = self.activeTasks.withLock { tasks -> [Task<Void, Never>] in
-            let values = Array(tasks.values)
-            tasks.removeAll()
-            return values
-        }
-
-        for task in tasks {
-            task.cancel()
-        }
-    }
 
     // MARK: - State Update
 

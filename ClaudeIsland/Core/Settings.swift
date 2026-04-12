@@ -316,6 +316,17 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: Keys.isNotchLocked) }
     }
 
+    // MARK: - Chat Split Ratio
+
+    /// The ratio of previous turns section height to total chat message area (0.15–0.85).
+    static var chatSplitRatio: Double {
+        get {
+            let value = defaults.double(forKey: Keys.chatSplitRatio)
+            return value > 0 ? value : 0.35
+        }
+        set { defaults.set(newValue, forKey: Keys.chatSplitRatio) }
+    }
+
     // MARK: Private
 
     // MARK: - Keys
@@ -338,6 +349,7 @@ enum AppSettings {
         static let globalHotkeyEnabled = "globalHotkeyEnabled"
         static let navigationStyle = "navigationStyle"
         static let enableTabFlashOnFocus = "enableTabFlashOnFocus"
+        static let chatSplitRatio = "chatSplitRatio"
     }
 
     private static let defaults = UserDefaults.standard

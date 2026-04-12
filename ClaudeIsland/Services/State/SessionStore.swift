@@ -105,7 +105,7 @@ actor SessionStore {
             self.scheduleFileSync(sessionID: sessionID, cwd: cwd)
 
         case let .markAsRead(sessionID):
-            self.processMarkAsRead(sessionID: sessionID)
+            if !self.processMarkAsRead(sessionID: sessionID) { return }
 
         case let .sessionEnded(sessionID):
             await self.processSessionEnd(sessionID: sessionID)
@@ -899,10 +899,13 @@ actor SessionStore {
 
     // MARK: - Interrupt Processing
 
-    private func processMarkAsRead(sessionID: String) {
-        guard var session = sessions[sessionID] else { return }
+    /// Returns `true` if the session was actually mutated (was unread → now read).
+    private func processMarkAsRead(sessionID: String) -> Bool {
+        guard var session = sessions[sessionID] else { return false }
+        guard session.hasUnreadUpdate else { return false }
         session.hasUnreadUpdate = false
         self.sessions[sessionID] = session
+        return true
     }
 
     private func processInterrupt(sessionID: String) async {

@@ -61,22 +61,26 @@ extension NotchWindowController {
     private static let contentSizeAnimationDuration: CFTimeInterval = 0.3
 
     /// Register a one-shot observation of the view model's `openedSize` and
-    /// drive the NSPanel frame in lockstep with SwiftUI's own animation.
+    /// drive the NSPanel frame to match content-type transitions.
     ///
-    /// `withObservationTracking`'s `onChange` fires synchronously from inside
-    /// the property setter — the same call stack as SwiftUI's `withAnimation`
-    /// block in `DetachedNotchView.headerRow`. Starting the NSWindow frame
-    /// animation here means both animations are scheduled in the same frame
-    /// and hit the same presentation commit.
+    /// The resize is dispatched to the next main-actor turn because
+    /// `withObservationTracking`'s `onChange` fires from `willSet` — before
+    /// the stored property is mutated. Reading `openedSize` synchronously
+    /// returns the stale value, making the resize a no-op. The one-tick
+    /// delay lets the mutation land first; SwiftUI's own view update is
+    /// similarly deferred, so both sides still animate in the same frame.
     func observeDetachedPanelContentSize() {
         withObservationTracking {
             // openedSize transitively reads contentType and selectorUpdateToken.
             _ = self.viewModel.openedSize
             _ = self.viewModel.windowMode
         } onChange: { [weak self] in
-            // onChange may fire on any thread per the docs; in this codebase
-            // the mutating setters always run on the main actor.
-            MainActor.assumeIsolated {
+            // IMPORTANT: withObservationTracking fires onChange from the
+            // registrar's willSet — BEFORE the stored property is mutated.
+            // Reading openedSize synchronously here returns the stale value,
+            // so the resize becomes a no-op. Dispatch to the next main-actor
+            // turn so the mutation has landed before we read the new size.
+            DispatchQueue.main.async {
                 self?.resizeDetachedPanelForContentType()
                 self?.observeDetachedPanelContentSize()
             }
@@ -94,6 +98,12 @@ extension NotchWindowController {
         guard let panel = self.detachedPanel,
               self.viewModel.windowMode == .detached
         else { return }
+
+        // The user is actively dragging a resize handle — the panel frame is
+        // being set directly via panel.setFrame() on every drag tick. Running
+        // the animated resize here would fight those direct calls (different
+        // origin due to centering logic + 0.3s animation curve vs. immediate).
+        guard !self.viewModel.isUserResizing else { return }
 
         let newSize = self.viewModel.openedSize
         let newHeight = newSize.height + DetachedNotchView.headerHeight
@@ -212,6 +222,9 @@ extension NotchWindowController {
                     self.viewModel.detachedOrigin = origin
                     return origin
                 },
+                currentPanelFrame: { [weak self] in
+                    self?.detachedPanel?.frame
+                },
                 onDrag: { [weak self] origin in
                     self?.detachedPanel?.setFrameOrigin(NSPoint(x: origin.x, y: origin.y))
                 },
@@ -223,8 +236,29 @@ extension NotchWindowController {
                         self.destroyDetachedPanel(animated: false)
                     }
                 },
+                onResizeGrip: { [weak self] newFrame in
+                    guard let self, let panel = self.detachedPanel else { return }
+                    self.viewModel.isUserResizing = true
+                    // Update the view model BEFORE setFrame so SwiftUI's .frame()
+                    // modifier already has the correct size when display is forced.
+                    let contentHeight = newFrame.height - DetachedNotchView.headerHeight
+                    self.viewModel.detachedUserSize = CGSize(width: newFrame.width, height: contentHeight)
+                    self.viewModel.detachedOrigin = newFrame.origin
+                    panel.setFrame(newFrame, display: true)
+                    Self.logger.debug("[resize-grip] new frame \(newFrame.width, privacy: .public)×\(newFrame.height, privacy: .public)")
+                },
+                onResizeEnd: { [weak self] in
+                    self?.viewModel.isUserResizing = false
+                },
             ),
         )
+        // Disable SwiftUI-driven window resizing (macOS 14+ default is .preferredContentSize).
+        // Without this, NSHostingView resizes the panel whenever the SwiftUI preferred
+        // content size changes — e.g. returning from chat to a long instances list whose
+        // ScrollView ideal height exceeds the 320 pt target, expanding the window beyond
+        // the size set by resizeDetachedPanelForContentType().
+        // All resizing is handled explicitly via panel.setFrame() / panel.animator().setFrame().
+        hostingView.sizingOptions = []
         panel.contentView = hostingView
 
         self.detachedPanel = panel

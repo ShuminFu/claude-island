@@ -112,6 +112,17 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
     /// Screen-coordinate origin for the detached panel during drag
     var detachedOrigin: CGPoint = .zero
 
+    /// User-set size from interactive resize of the detached panel.
+    /// Overrides the content-type default in `openedSize` while detached.
+    /// Persists across content-type switches within a single detach session;
+    /// cleared only when the panel is docked back via `snapBackToNotch()`.
+    var detachedUserSize: CGSize?
+
+    /// True while the user is actively dragging a resize handle.
+    /// Suppresses the observation-driven `resizeDetachedPanelForContentType`
+    /// animated resize so it doesn't fight the direct `panel.setFrame()` calls.
+    var isUserResizing = false
+
     // MARK: - Keyboard Navigation State
 
     /// Selected instance stableID for keyboard navigation
@@ -171,6 +182,11 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
     var openedSize: CGSize {
         // Touch token to establish observation dependency
         _ = self.selectorUpdateToken
+
+        // In detached mode, respect the user's manual resize override
+        if self.windowMode == .detached, let userSize = self.detachedUserSize {
+            return userSize
+        }
 
         switch self.contentType {
         case .chat:
@@ -285,6 +301,8 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
         guard self.windowMode == .detached || self.windowMode == .detaching else { return }
         self.isInSnapZone = false
         self.windowMode = .docked
+        // Clear the user resize so the next detach starts at content-type defaults.
+        self.detachedUserSize = nil
     }
 
     /// Reset keyboard selection state
@@ -343,6 +361,7 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
 
     func toggleMenu() {
         self.resetKeyboardSelection()
+        self.detachedUserSize = nil
         self.contentType = self.contentType == .menu ? .instances : .menu
     }
 
@@ -353,6 +372,7 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
         }
         // Preserve selectedInstanceID so we can restore highlight when returning to instances
         self.isKeyboardNavigating = false
+        self.detachedUserSize = nil
         self.contentType = .chat(session)
 
         // Mark session as read when user opens chat
@@ -369,6 +389,7 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
         // Restore keyboard navigation highlight if we still have a selected instance
         // (selectedInstanceID was preserved when entering chat)
         self.isKeyboardNavigating = self.selectedInstanceID != nil
+        self.detachedUserSize = nil
         self.contentType = .instances
     }
 
@@ -461,7 +482,15 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
             return true
 
         case .close:
-            self.notchClose()
+            if self.windowMode == .detached {
+                // In detached mode Escape snaps the panel back to the notch.
+                // Calling notchClose() here would set status → .closed and tear
+                // down the keyboard monitor while the floating panel is still
+                // visible, leaving the UI in a broken state.
+                self.snapBackToNotch()
+            } else {
+                self.notchClose()
+            }
             return true
         }
     }

@@ -20,10 +20,18 @@ struct ClaudeInstancesView: View {
     var viewModel: NotchViewModel
 
     var body: some View {
-        if self.sessionMonitor.instances.isEmpty {
-            self.emptyState
-        } else {
-            self.instancesList
+        Group {
+            if self.sessionMonitor.instances.isEmpty {
+                self.emptyState
+            } else {
+                self.instancesList
+            }
+        }
+        .onAppear {
+            self.sortedInstances = self.sessionMonitor.instances.sortedByPriority()
+        }
+        .onChange(of: self.sessionMonitor.instances) { _, newInstances in
+            self.sortedInstances = newInstances.sortedByPriority()
         }
     }
 
@@ -31,12 +39,9 @@ struct ClaudeInstancesView: View {
 
     // MARK: - Instances List
 
-    /// Priority: active (approval/processing/compacting) > waitingForInput > idle
-    /// Secondary sort: by last user message date (stable - doesn't change when agent responds)
-    /// Note: approval requests stay in their date-based position to avoid layout shift
-    private var sortedInstances: [SessionState] {
-        self.sessionMonitor.instances.sortedByPriority()
-    }
+    /// Cached sorted instances — only recomputed when the source array changes,
+    /// not on every body evaluation (decouples from viewModel property changes).
+    @State private var sortedInstances: [SessionState] = []
 
     // MARK: - Empty State
 
@@ -66,6 +71,7 @@ struct ClaudeInstancesView: View {
                             onChat: { self.openChat(session) },
                             onArchive: { self.archiveSession(session) },
                             onApprove: { self.approveSession(session) },
+                            onAlwaysAllow: { self.approveSessionAlways(session) },
                             onReject: { self.rejectSession(session) },
                             onHoverStart: { self.viewModel.isKeyboardNavigating = false },
                         )
@@ -113,6 +119,10 @@ struct ClaudeInstancesView: View {
         self.sessionMonitor.approvePermission(sessionID: session.sessionID)
     }
 
+    private func approveSessionAlways(_ session: SessionState) {
+        self.sessionMonitor.approvePermissionAlways(sessionID: session.sessionID)
+    }
+
     private func rejectSession(_ session: SessionState) {
         self.sessionMonitor.denyPermission(sessionID: session.sessionID, reason: nil)
     }
@@ -129,30 +139,12 @@ struct InlineApprovalButtons: View {
     // MARK: Internal
 
     let onApprove: () -> Void
+    let onAlwaysAllow: () -> Void
     let onReject: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
-            Button {
-                self.onReject()
-            } label: {
-                HStack(spacing: 3) {
-                    Text("d")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.35))
-                    Text("Deny")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.6))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.white.opacity(0.1))
-                .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .opacity(self.showDenyButton ? 1 : 0)
-            .scaleEffect(self.showDenyButton ? 1 : 0.8)
-
+            // Allow (once)
             Button {
                 self.onApprove()
             } label: {
@@ -164,6 +156,7 @@ struct InlineApprovalButtons: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.black)
                 }
+                .fixedSize()
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(Color.white.opacity(0.9))
@@ -172,21 +165,69 @@ struct InlineApprovalButtons: View {
             .buttonStyle(.plain)
             .opacity(self.showAllowButton ? 1 : 0)
             .scaleEffect(self.showAllowButton ? 1 : 0.8)
+
+            // Always allow
+            Button {
+                self.onAlwaysAllow()
+            } label: {
+                HStack(spacing: 3) {
+                    Text("s")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                    Text("Always")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .fixedSize()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.15))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .opacity(self.showAlwaysButton ? 1 : 0)
+            .scaleEffect(self.showAlwaysButton ? 1 : 0.8)
+
+            // Deny
+            Button {
+                self.onReject()
+            } label: {
+                HStack(spacing: 3) {
+                    Text("d")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                    Text("Deny")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                .fixedSize()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.1))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .opacity(self.showDenyButton ? 1 : 0)
+            .scaleEffect(self.showDenyButton ? 1 : 0.8)
         }
         .onAppear {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.0)) {
-                self.showDenyButton = true
+                self.showAllowButton = true
             }
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.05)) {
-                self.showAllowButton = true
+                self.showAlwaysButton = true
+            }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.1)) {
+                self.showDenyButton = true
             }
         }
     }
 
     // MARK: Private
 
-    @State private var showDenyButton = false
     @State private var showAllowButton = false
+    @State private var showAlwaysButton = false
+    @State private var showDenyButton = false
 }
 
 // MARK: - IconButton
@@ -328,10 +369,13 @@ final class AlwaysActiveHoverNSView: NSView {
 
     var onChange: (Bool) -> Void
 
+    /// Only remove and re-add *our own* tracking area, mirroring `FirstMouseHostingView`.
+    /// Storing the reference means we never accidentally remove tracking areas that
+    /// SwiftUI or other subsystems installed on this view.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in self.trackingAreas {
-            self.removeTrackingArea(area)
+        if let existing = self.hoverArea {
+            self.removeTrackingArea(existing)
         }
         let area = NSTrackingArea(
             rect: self.bounds,
@@ -340,6 +384,7 @@ final class AlwaysActiveHoverNSView: NSView {
             userInfo: nil,
         )
         self.addTrackingArea(area)
+        self.hoverArea = area
     }
 
     override func mouseEntered(with _: NSEvent) {
@@ -354,6 +399,10 @@ final class AlwaysActiveHoverNSView: NSView {
     override func hitTest(_: NSPoint) -> NSView? {
         nil
     }
+
+    // MARK: Private
+
+    private var hoverArea: NSTrackingArea?
 }
 
 // MARK: - RightClickDetector

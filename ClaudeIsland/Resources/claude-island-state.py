@@ -593,11 +593,17 @@ def determine_status(
             return "unknown", {}
 
 
-def handle_permission_response(response: PermissionResponse | None, /) -> None:
+def handle_permission_response(
+    response: PermissionResponse | None,
+    /,
+    *,
+    tool_name: str | None = None,
+) -> None:
     """Handle the permission response from ClaudeIsland.app.
 
     Args:
         response: The response dictionary from the app, or None
+        tool_name: The tool name from the hook event, used for always-allow rules
     """
     if not response:
         # No response or "ask" - let Claude Code show its normal UI
@@ -613,6 +619,27 @@ def handle_permission_response(response: PermissionResponse | None, /) -> None:
                 "hookSpecificOutput": {
                     "hookEventName": "PermissionRequest",
                     "decision": {"behavior": "allow"},
+                }
+            }
+            print(json.dumps(output))
+            sys.exit(0)
+
+        case "allow_always":
+            # Add an allow rule to localSettings so the tool is never prompted again
+            decision_payload: dict[str, object] = {"behavior": "allow"}
+            if tool_name:
+                decision_payload["updatedPermissions"] = [
+                    {
+                        "type": "addRules",
+                        "rules": [{"toolName": tool_name}],
+                        "behavior": "allow",
+                        "destination": "localSettings",
+                    }
+                ]
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": decision_payload,
                 }
             }
             print(json.dumps(output))
@@ -697,7 +724,7 @@ def main() -> None:
 
     # Permission requests return the decision; all others print empty JSON
     if status == "waiting_for_approval":
-        handle_permission_response(response)
+        handle_permission_response(response, tool_name=state.tool)
     else:
         print("{}")
 

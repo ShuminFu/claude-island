@@ -126,4 +126,17 @@ class DetachedPanel: NSPanel {
     override var canBecomeMain: Bool {
         false
     }
+
+    /// Activate the app on any mouse-down inside the detached panel so that the
+    /// local keyboard monitor in `NotchView` starts receiving events.
+    /// Without this, `.nonactivatingPanel` keeps our app in the background even
+    /// after a click, which means `NSEvent.addLocalMonitorForEvents` never fires
+    /// and all keyboard shortcuts (navigation, allow/deny) are silently dropped.
+    override func mouseDown(with event: NSEvent) {
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+            self.makeKeyAndOrderFront(nil)
+        }
+        super.mouseDown(with: event)
+    }
 }

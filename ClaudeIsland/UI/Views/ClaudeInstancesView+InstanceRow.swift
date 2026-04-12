@@ -19,6 +19,7 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
     let onChat: () -> Void
     let onArchive: () -> Void
     let onApprove: () -> Void
+    let onAlwaysAllow: () -> Void
     let onReject: () -> Void
     var onHoverStart: (() -> Void)?
 
@@ -46,12 +47,19 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
             self.isHovered = hovering
             if hovering {
                 self.onHoverStart?()
-                // Mark as read when mouse hovers over the row
+                // Debounced mark-as-read: avoids the layout-shift → re-hover stutter loop
+                // caused by bold→normal font weight change triggering tracking area events.
                 if self.session.hasUnreadUpdate {
-                    Task(name: "hover-mark-read") {
+                    self.pendingMarkAsRead?.cancel()
+                    self.pendingMarkAsRead = Task(name: "hover-mark-read") { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(150))
+                        guard !Task.isCancelled else { return }
                         await SessionStore.shared.process(.markAsRead(sessionID: self.session.sessionID))
                     }
                 }
+            } else {
+                self.pendingMarkAsRead?.cancel()
+                self.pendingMarkAsRead = nil
             }
         }
         .onChange(of: self.isSelected) { _, selected in
@@ -88,6 +96,9 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
     @State private var editingName = ""
     @State private var hoverZone: HoverZone?
     @State private var pendingHoverExit: Task<Void, Never>?
+    @State private var pendingHoverEnter: Task<Void, Never>?
+    @State private var pendingMarkAsRead: Task<Void, Never>?
+    @State private var isTitleTruncated = false
     @FocusState private var isTitleFocused: Bool
 
     private let metadataManager = SessionMetadataManager.shared
@@ -159,7 +170,15 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
                                 .foregroundColor(self.session.hasUnreadUpdate ? .white : .white.opacity(0.85))
                                 .lineLimit(1)
                                 .padding(.vertical, 2)
-                                .contentShape(Rectangle())
+                                .background(
+                                    GeometryReader { proxy in
+                                        Color.clear
+                                            .onAppear { self.checkTitleTruncation(availableWidth: proxy.size.width) }
+                                            .onChange(of: proxy.size.width) { _, w in
+                                                if !self.isTitleHovered { self.checkTitleTruncation(availableWidth: w) }
+                                            }
+                                    }
+                                )
                                 .onAlwaysActiveHover { hovering in
                                     if hovering {
                                         self.enterHoverZone(.title)
@@ -173,7 +192,9 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
                             HStack(spacing: 3) {
                                 Image(systemName: "arrow.triangle.branch")
                                     .font(.system(size: 8))
-                                if !self.isTitleHovered {
+                                // Only hide capsule text when title is actually truncated —
+                                // collapsing it when the title fits is unnecessary churn.
+                                if !self.isTitleHovered || !self.isTitleTruncated {
                                     if let branch = self.session.gitBranch {
                                         Text("\(repoName) / \(branch)")
                                             .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -352,6 +373,7 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
                 } else if self.isWaitingForApproval {
                     InlineApprovalButtons(
                         onApprove: self.onApprove,
+                        onAlwaysAllow: self.onAlwaysAllow,
                         onReject: self.onReject,
                     )
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
@@ -382,15 +404,15 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
         switch self.session.phase {
         case .processing,
              .compacting:
-            TimelineView(.periodic(from: .now, by: 0.15)) { context in
-                let phase = Int(context.date.timeIntervalSinceReferenceDate / 0.15) % self.spinnerSymbols.count
+            TimelineView(.periodic(from: .now, by: 0.3)) { context in
+                let phase = Int(context.date.timeIntervalSinceReferenceDate / 0.3) % self.spinnerSymbols.count
                 Text(self.spinnerSymbols[phase])
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(self.claudeOrange)
             }
         case .waitingForApproval:
-            TimelineView(.periodic(from: .now, by: 0.15)) { context in
-                let phase = Int(context.date.timeIntervalSinceReferenceDate / 0.15) % self.spinnerSymbols.count
+            TimelineView(.periodic(from: .now, by: 0.3)) { context in
+                let phase = Int(context.date.timeIntervalSinceReferenceDate / 0.3) % self.spinnerSymbols.count
                 Text(self.spinnerSymbols[phase])
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(TerminalColors.amber)
@@ -421,12 +443,36 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
         }
     }
 
+    /// Measure whether the title text overflows its rendered width using NSFont,
+    /// which avoids a second SwiftUI layout pass. Only called while the capsule
+    /// is visible (i.e. not while isTitleHovered) to keep the reference stable.
+    private func checkTitleTruncation(availableWidth: CGFloat) {
+        let weight: NSFont.Weight = self.session.hasUnreadUpdate ? .semibold : .medium
+        let font = NSFont.systemFont(ofSize: 13, weight: weight)
+        let textWidth = (self.displayTitle as NSString).size(withAttributes: [.font: font]).width
+        self.isTitleTruncated = textWidth > availableWidth + 1
+    }
+
     /// Enter a hover zone immediately; cancels any pending exit so a re-entry
     /// that happens during a flicker blip does not clear the state mid-animation.
+    /// Entering `.title` from a content zone is debounced to filter spurious
+    /// NSTrackingArea events fired when the layout animation moves backing views.
     private func enterHoverZone(_ zone: HoverZone) {
         self.pendingHoverExit?.cancel()
         self.pendingHoverExit = nil
-        if self.hoverZone != zone {
+        guard self.hoverZone != zone else { return }
+        if zone == .title, self.hoverZone != nil {
+            // Debounce: a real cursor movement into the title area lasts >80 ms;
+            // animation-induced spurious events fire and clear within a few frames.
+            self.pendingHoverEnter?.cancel()
+            self.pendingHoverEnter = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(80))
+                guard !Task.isCancelled else { return }
+                self.hoverZone = .title
+            }
+        } else {
+            self.pendingHoverEnter?.cancel()
+            self.pendingHoverEnter = nil
             self.hoverZone = zone
         }
     }
@@ -434,10 +480,12 @@ struct InstanceRow: View { // swiftlint:disable:this type_body_length
     /// Debounce hover exits so a momentary mouse-out (caused by layout reflow
     /// when text grows/shrinks) does not flicker the state.
     private func scheduleHoverExit(_ zone: HoverZone) {
+        self.pendingHoverEnter?.cancel()
+        self.pendingHoverEnter = nil
         guard self.hoverZone == zone else { return }
         self.pendingHoverExit?.cancel()
         self.pendingHoverExit = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(80))
+            try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
             if self.hoverZone == zone {
                 self.hoverZone = nil

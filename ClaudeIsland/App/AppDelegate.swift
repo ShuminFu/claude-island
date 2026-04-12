@@ -68,7 +68,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Configure and start global hotkey to toggle the notch panel
         GlobalHotkeyManager.shared.onToggle = { [weak self] in
-            self?.windowController?.viewModel.toggleNotch()
+            guard let wc = self?.windowController else { return }
+            if wc.viewModel.windowMode == .detached {
+                // In detached mode: activate the app so the local key monitor fires,
+                // then focus the floating panel (mirrors what docked hotkey does)
+                NSApp.activate()
+                wc.detachedPanel?.makeKeyAndOrderFront(nil)
+            } else {
+                wc.viewModel.toggleNotch()
+            }
         }
         GlobalHotkeyManager.shared.start()
 

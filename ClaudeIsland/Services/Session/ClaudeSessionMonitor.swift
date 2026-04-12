@@ -119,6 +119,26 @@ final class ClaudeSessionMonitor {
         }
     }
 
+    func approvePermissionAlways(sessionID: String) {
+        Task(name: "approve-permission-always") {
+            guard let session = await SessionStore.shared.session(for: sessionID),
+                  let permission = session.activePermission
+            else {
+                return
+            }
+
+            HookSocketServer.shared.respondToPermission(
+                toolUseID: permission.toolUseID,
+                decision: "allow_always",
+            )
+
+            await SessionStore.shared.process(
+                .permissionApproved(sessionID: sessionID, toolUseID: permission.toolUseID),
+            )
+            await SessionStore.shared.process(.markAsRead(sessionID: sessionID))
+        }
+    }
+
     func denyPermission(sessionID: String, reason: String?) {
         Task(name: "deny-permission") {
             guard let session = await SessionStore.shared.session(for: sessionID),
@@ -164,7 +184,12 @@ final class ClaudeSessionMonitor {
     // MARK: - State Update
 
     private func updateFromSessions(_ sessions: [SessionState]) {
-        self.instances = sessions
-        self.pendingInstances = sessions.filter(\.needsAttention)
+        let newPending = sessions.filter(\.needsAttention)
+        if self.instances != sessions {
+            self.instances = sessions
+        }
+        if self.pendingInstances != newPending {
+            self.pendingInstances = newPending
+        }
     }
 }

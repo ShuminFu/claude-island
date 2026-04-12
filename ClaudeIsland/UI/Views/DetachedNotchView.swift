@@ -10,6 +10,164 @@ import AppKit
 import os.log
 import SwiftUI
 
+// MARK: - ResizeDirection
+
+/// Resize edges and corners available on the detached panel.
+/// The top edge is intentionally omitted — the header strip already owns that
+/// area as a window-drag target and adding a resize zone there would conflict.
+private enum ResizeDirection {
+    case south, east, west, southEast, southWest
+
+    /// Cursor pushed while hovering.
+    /// `NSCursor.push/pop` rather than cursor rects: push/pop survives `makeKey()`
+    /// calls (which invalidate cursor rects), so the cursor stays correct while dragging
+    /// even after the panel becomes key on first click.
+    var cursor: NSCursor {
+        switch self {
+        case .south: return .resizeUpDown
+        case .east, .west: return .resizeLeftRight
+        case .southEast, .southWest:
+            // No public diagonal cursor — crosshair clearly signals "drag freely here"
+            return .crosshair
+        }
+    }
+
+    private static let minWidth: CGFloat = 320
+    private static let minHeight: CGFloat = 232  // 200pt content + 32pt header
+
+    /// Compute the new window frame given the mouse delta from `startFrame`.
+    /// Axis: AppKit screen coordinates (Y increases upward).
+    /// dy < 0 when the cursor moves downward.
+    func newFrame(from start: NSRect, dx: CGFloat, dy: CGFloat) -> NSRect {
+        let minW = Self.minWidth
+        let minH = Self.minHeight
+        switch self {
+        case .south:
+            // Top (maxY) fixed; bottom (minY) moves.  dy < 0 ⟹ taller.
+            let newH = max(minH, start.height - dy)
+            return NSRect(x: start.minX, y: start.maxY - newH, width: start.width, height: newH)
+        case .east:
+            let newW = max(minW, start.width + dx)
+            return NSRect(x: start.minX, y: start.minY, width: newW, height: start.height)
+        case .west:
+            let newW = max(minW, start.width - dx)
+            return NSRect(x: start.maxX - newW, y: start.minY, width: newW, height: start.height)
+        case .southEast:
+            let newW = max(minW, start.width + dx)
+            let newH = max(minH, start.height - dy)
+            return NSRect(x: start.minX, y: start.maxY - newH, width: newW, height: newH)
+        case .southWest:
+            let newW = max(minW, start.width - dx)
+            let newH = max(minH, start.height - dy)
+            return NSRect(x: start.maxX - newW, y: start.maxY - newH, width: newW, height: newH)
+        }
+    }
+}
+
+// MARK: - ResizeHandle
+
+/// Transparent hit-area view for a single resize edge or corner.
+///
+/// Cursor management uses `NSCursor.push/pop` so the resize cursor survives
+/// the `makeKey()` call triggered by `FirstMouseHostingView.mouseEntered`.
+/// When the cursor exits the hit area mid-drag we skip the pop and defer it
+/// to `onEnded`, keeping the cursor stable for the lifetime of the drag.
+private struct ResizeHandle: View {
+    // MARK: Lifecycle
+
+    init(
+        direction: ResizeDirection,
+        showsGripIndicator: Bool = false,
+        currentPanelFrame: @escaping () -> NSRect?,
+        onResize: @escaping (NSRect) -> Void,
+        onResizeEnd: @escaping () -> Void = {},
+    ) {
+        self.direction = direction
+        self.showsGripIndicator = showsGripIndicator
+        self.currentPanelFrame = currentPanelFrame
+        self.onResize = onResize
+        self.onResizeEnd = onResizeEnd
+    }
+
+    // MARK: Internal
+
+    var body: some View {
+        ZStack {
+            Color.clear
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    if hovering, !self.isCursorPushed {
+                        self.direction.cursor.push()
+                        self.isCursorPushed = true
+                    } else if !hovering, self.dragState == nil, self.isCursorPushed {
+                        NSCursor.pop()
+                        self.isCursorPushed = false
+                    }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .onChanged { _ in
+                            let mouse = NSEvent.mouseLocation
+                            if self.dragState == nil {
+                                guard let frame = self.currentPanelFrame() else { return }
+                                self.dragState = DragState(startFrame: frame, startMouse: mouse)
+                                return
+                            }
+                            guard let state = self.dragState else { return }
+                            let dx = mouse.x - state.startMouse.x
+                            let dy = mouse.y - state.startMouse.y
+                            self.onResize(self.direction.newFrame(from: state.startFrame, dx: dx, dy: dy))
+                        }
+                        .onEnded { _ in
+                            self.dragState = nil
+                            self.onResizeEnd()
+                            if self.isCursorPushed {
+                                NSCursor.pop()
+                                self.isCursorPushed = false
+                            }
+                        },
+                )
+
+            if self.showsGripIndicator {
+                self.gripLines.allowsHitTesting(false)
+            }
+        }
+    }
+
+    // MARK: Private
+
+    private struct DragState {
+        let startFrame: NSRect
+        let startMouse: NSPoint
+    }
+
+    private let direction: ResizeDirection
+    private let showsGripIndicator: Bool
+    private let currentPanelFrame: () -> NSRect?
+    private let onResize: (NSRect) -> Void
+    private let onResizeEnd: () -> Void
+
+    @State private var dragState: DragState?
+    @State private var isCursorPushed = false
+
+    /// SE-corner diagonal-line indicator. Four `/`-oriented parallel lines
+    /// that connect the bottom edge to the right edge of the canvas, stacked
+    /// toward the corner — matching the classic macOS grow-box style.
+    private var gripLines: some View {
+        Canvas { ctx, size in
+            for i in 2 ..< 4 {
+                let offset = CGFloat(i + 1) * 4.5
+                let start = CGPoint(x: size.width - offset, y: size.height - 2)
+                let end = CGPoint(x: size.width - 2, y: size.height - offset)
+                var path = Path()
+                path.move(to: start)
+                path.addLine(to: end)
+                ctx.stroke(path, with: .color(.white.opacity(0.3)), lineWidth: 1.5)
+            }
+        }
+    }
+}
+
 // MARK: - DetachedNotchView
 
 struct DetachedNotchView: View {
@@ -18,13 +176,19 @@ struct DetachedNotchView: View {
     init(
         viewModel: NotchViewModel,
         currentPanelOrigin: @escaping () -> CGPoint?,
+        currentPanelFrame: @escaping () -> NSRect?,
         onDrag: @escaping (CGPoint) -> Void,
         onDragEnd: @escaping (CGPoint) -> Void,
+        onResizeGrip: @escaping (NSRect) -> Void,
+        onResizeEnd: @escaping () -> Void,
     ) {
         self.viewModel = viewModel
         self.currentPanelOrigin = currentPanelOrigin
+        self.currentPanelFrame = currentPanelFrame
         self.onDrag = onDrag
         self.onDragEnd = onDragEnd
+        self.onResizeGrip = onResizeGrip
+        self.onResizeEnd = onResizeEnd
     }
 
     // MARK: Internal
@@ -32,28 +196,25 @@ struct DetachedNotchView: View {
     nonisolated static let logger = Logger(subsystem: "com.engels74.ClaudeIsland", category: "DetachedNotchView")
 
     /// Height of the header row that carries the drag gesture and dock-back / menu buttons.
-    /// This row replaces the standalone drag handle strip — its size now matches the notch's
-    /// closed header so the detached and docked layouts share the same total height.
     static let headerHeight: CGFloat = 32
 
     var viewModel: NotchViewModel
     let currentPanelOrigin: () -> CGPoint?
+    let currentPanelFrame: () -> NSRect?
     let onDrag: (CGPoint) -> Void
     let onDragEnd: (CGPoint) -> Void
+    let onResizeGrip: (NSRect) -> Void
+    let onResizeEnd: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             // Header row: drag gesture on the background, pill affordance in the middle,
             // buttons layered on top to intercept their own taps first.
             ZStack {
-                // Drag-eligible background. Color.clear with contentShape(Rectangle())
-                // catches mouse events outside the buttons. SwiftUI dispatches taps to
-                // child views first, so button clicks are not swallowed by this gesture.
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(self.dragGesture)
 
-                // Visual pill — centered, non-interactive so it never blocks hit-testing
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Color.white.opacity(0.25))
                     .frame(width: 32, height: 3)
@@ -61,33 +222,30 @@ struct DetachedNotchView: View {
                     .padding(.top, 6)
                     .allowsHitTesting(false)
 
-                // Dock-back / menu buttons on top
                 self.headerRow
                     .padding(.horizontal, 12)
             }
             .frame(height: Self.headerHeight)
-            // Solid background + zIndex keeps the header visually on top of the
-            // content layer during resize animations. When `openedSize` changes,
-            // the outer VStack height animates while the content view's natural
-            // size updates instantly, leaving a brief window where content can
-            // bleed up into the header row. The opaque header hides that
-            // overflow — unlike the previous `.frame(maxHeight: .infinity).clipped()`
-            // wrapper on the content, which swallowed row clicks after the first
-            // resize because it inserted a fill-the-slot layout layer in between.
             .background(Color.black)
             .zIndex(1)
 
-            // Main content at its natural size. No surrounding fill-the-slot
-            // frame or `.clipped()` — those broke hit-testing on rows after a
-            // resize animation.
             self.contentView
-                .frame(width: self.viewModel.openedSize.width - 24)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 12)
                 .padding(.bottom, 12)
         }
+        // Use a fixed frame at the target size so SwiftUI lays out content
+        // exactly once per content-type switch. Without this, the 0.3s NSWindow
+        // resize animation continuously changes the hosting view bounds, causing
+        // SwiftUI to re-layout ChatView/ScrollView at every intermediate size
+        // (~18 passes at 60 fps) — visible as stutter. With a fixed frame,
+        // SwiftUI sees an unchanged proposal on each animation tick and skips
+        // descendant layout. The window clips the content during the animation
+        // and progressively reveals it (a "Dynamic Island unfold" effect).
         .frame(
             width: self.viewModel.openedSize.width,
             height: self.viewModel.openedSize.height + Self.headerHeight,
-            alignment: .top,
+            alignment: .top
         )
         .background(.black)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -95,6 +253,9 @@ struct DetachedNotchView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1),
         )
+        // Resize handles sit in an overlay AFTER clipShape so they are not clipped
+        // and cover the full rectangular window frame (including rounded-corner zones).
+        .overlay { self.resizeHandleOverlay }
         .preferredColorScheme(.dark)
         .onAppear {
             self.sessionMonitor.startMonitoring()
@@ -107,25 +268,51 @@ struct DetachedNotchView: View {
     @State private var dragStartOrigin: CGPoint?
     @State private var dragStartMouse: CGPoint?
 
-    /// Drag gesture for moving the detached panel.
-    /// Reads the current mouse location via `NSEvent.mouseLocation` so we get
-    /// AppKit screen coordinates (Y up) directly, avoiding any conversion from
-    /// SwiftUI's global coordinate space (Y down).
-    ///
-    /// This bypasses the NSEvent local-monitor path in `NotchDragController`,
-    /// which is unreliable for clicks on a `.nonactivatingPanel` host view.
+    // MARK: - Resize handle overlay
+
+    /// Five handles cover all user-reachable resize directions.
+    /// Top-edge resize is omitted because the header strip is a drag target there.
+    /// Corners are placed last (highest z-index) so they take priority over the
+    /// edge handles in the overlap zone at each bottom corner.
+    private var resizeHandleOverlay: some View {
+        let edge: CGFloat = 10      // hit-area thickness for edge handles
+        let corner: CGFloat = 20    // hit-area side length for corner handles
+
+        return ZStack {
+            // Bottom edge
+            ResizeHandle(direction: .south, currentPanelFrame: self.currentPanelFrame, onResize: self.onResizeGrip, onResizeEnd: self.onResizeEnd)
+                .frame(height: edge)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+
+            // Right edge
+            ResizeHandle(direction: .east, currentPanelFrame: self.currentPanelFrame, onResize: self.onResizeGrip, onResizeEnd: self.onResizeEnd)
+                .frame(width: edge)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+
+            // Left edge
+            ResizeHandle(direction: .west, currentPanelFrame: self.currentPanelFrame, onResize: self.onResizeGrip, onResizeEnd: self.onResizeEnd)
+                .frame(width: edge)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+
+            // SW corner (above edges in z-order)
+            ResizeHandle(direction: .southWest, currentPanelFrame: self.currentPanelFrame, onResize: self.onResizeGrip, onResizeEnd: self.onResizeEnd)
+                .frame(width: corner, height: corner)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+
+            // SE corner with diagonal-line visual (highest z-order)
+            ResizeHandle(direction: .southEast, showsGripIndicator: true, currentPanelFrame: self.currentPanelFrame, onResize: self.onResizeGrip, onResizeEnd: self.onResizeEnd)
+                .frame(width: corner, height: corner)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        }
+    }
+
+    // MARK: - Drag gesture (window move)
+
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { _ in
                 let mouseLocation = NSEvent.mouseLocation
                 if self.dragStartOrigin == nil {
-                    // Anchor from the panel's *actual* current frame origin, not
-                    // the view model's `detachedOrigin`. During a content-type
-                    // resize, `resizeDetachedPanelForContentType` sets
-                    // `detachedOrigin` to the animation's target origin
-                    // immediately while the NSPanel itself is still interpolating
-                    // toward it. Using the target would teleport the panel by the
-                    // remaining animation distance on the first mouse-move event.
                     self.dragStartOrigin = self.currentPanelOrigin() ?? self.viewModel.detachedOrigin
                     self.dragStartMouse = mouseLocation
                     return
@@ -149,9 +336,10 @@ struct DetachedNotchView: View {
             }
     }
 
+    // MARK: - Header
+
     private var headerRow: some View {
         HStack(spacing: 8) {
-            // Clawd icon on left
             ClaudeCrabIcon(
                 size: 14,
                 color: AppSettings.clawdColor,
@@ -160,10 +348,6 @@ struct DetachedNotchView: View {
 
             Spacer()
 
-            // Dock back button (arrow icon snaps back to notch).
-            // We use .onTapGesture rather than Button because SwiftUI Buttons
-            // inside a .nonactivatingPanel can swallow the first click while
-            // the panel is becoming key — tap gestures dispatch reliably.
             Image(systemName: "arrow.up.to.line")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
@@ -174,17 +358,6 @@ struct DetachedNotchView: View {
                 }
                 .help("Dock back to notch")
 
-            // Menu toggle.
-            // The `.easeInOut(duration: 0.3)` here is deliberately paired with
-            // the matching `NSAnimationContext` curve used by the controller's
-            // `resizeDetachedPanelForContentType`. SwiftUI's `.easeInOut` maps
-            // to the same cubic bezier `(0.42, 0, 0.58, 1.0)` that Core
-            // Animation's `.easeInEaseOut` uses, so the SwiftUI `.frame`
-            // animation and the NSWindow frame animation trace identical
-            // curves over the same duration and the top edge stays locked.
-            // A spring curve (what the docked notch uses) has no bezier
-            // equivalent for NSWindow frame animations — the two sides would
-            // drift and the top would tear mid-flight.
             Image(systemName: self.viewModel.contentType == .menu ? "xmark" : "line.3.horizontal")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
@@ -197,6 +370,8 @@ struct DetachedNotchView: View {
                 }
         }
     }
+
+    // MARK: - Content
 
     private var contentView: some View {
         Group {
@@ -217,12 +392,6 @@ struct DetachedNotchView: View {
                 )
             }
         }
-        // Disable the default cross-fade transition between content types. Without
-        // this, SwiftUI keeps the outgoing view (e.g. ChatView or ClaudeInstancesView)
-        // rendered at its previous layout position during the withAnimation resize,
-        // which visually bleeds ghost content through the transparent header row and
-        // looks like content "sliding down from the top". Only the outer frame
-        // resize stays animated; the content switch itself is instant.
         .animation(nil, value: self.viewModel.contentType)
     }
 }

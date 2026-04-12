@@ -595,17 +595,17 @@ struct NotchView: View {
         let vm = self.viewModel
         let sm = self.sessionMonitor
         self.keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Don't intercept keys while panel is detached or being dragged
-            guard vm.windowMode == .docked else { return event }
             // Don't intercept keys while recording a new hotkey shortcut
             guard !GlobalHotkeyManager.shared.isRecording else { return event }
-            // Cmd+D → toggle detach lock
-            if event.modifierFlags.contains(.command) && event.keyCode == 2 {
-                vm.toggleLock()
-                return nil
+            // Don't intercept keys with Command modifier (system shortcuts, Cmd+V in chat)
+            if event.modifierFlags.contains(.command) {
+                // Cmd+D → toggle detach lock (docked only)
+                if vm.windowMode == .docked && event.keyCode == 2 {
+                    vm.toggleLock()
+                    return nil
+                }
+                return event
             }
-            // Don't intercept other keys with Command modifier (system shortcuts, Cmd+V in chat)
-            if event.modifierFlags.contains(.command) { return event }
 
             // Vim-like modal behavior: check if a text field has focus ("insert mode")
             let isTextFieldFocused: Bool = {
@@ -621,26 +621,28 @@ struct NotchView: View {
                 return event // All other keys pass through to text field
             }
 
-            // Normal mode: Tab in chat view → enter insert mode (focus text input)
-            if event.keyCode == 48 { // Tab
-                if case .chat = vm.contentType {
-                    vm.requestChatInputFocus = true
-                    return nil
-                }
-            }
-
-            // Normal mode: permission shortcuts (a = approve, d = deny)
+            // Permission shortcuts (a = allow, s = always allow, d = deny)
             let sorted = sm.instances.sortedByPriority()
-            if case .instances = vm.contentType,
-               let selectedID = vm.selectedInstanceID,
-               let session = sorted.first(where: { $0.stableID == selectedID }),
+            // Prefer the keyboard-selected instance; fall back to the highest-priority
+            // waiting-for-approval session when no selection exists — typical in detached
+            // mode where arrow-key navigation hasn't run yet.
+            let permSession: SessionState? = {
+                guard case .instances = vm.contentType else { return nil }
+                if let id = vm.selectedInstanceID,
+                   let s = sorted.first(where: { $0.stableID == id }) { return s }
+                return sorted.first { $0.phase.isWaitingForApproval && $0.pendingToolName != "AskUserQuestion" }
+            }()
+            if let session = permSession,
                session.phase.isWaitingForApproval,
                session.pendingToolName != "AskUserQuestion" {
                 switch event.keyCode {
-                case 0: // 'a' key → approve
+                case 0: // 'a' → allow once
                     sm.approvePermission(sessionID: session.sessionID)
                     return nil
-                case 2: // 'd' key → deny
+                case 1: // 's' → always allow
+                    sm.approvePermissionAlways(sessionID: session.sessionID)
+                    return nil
+                case 2: // 'd' → deny
                     sm.denyPermission(sessionID: session.sessionID, reason: nil)
                     return nil
                 default:
@@ -648,7 +650,18 @@ struct NotchView: View {
                 }
             }
 
-            // Normal mode: let ViewModel handle navigation
+            // Don't intercept keys while the drag gesture is live
+            guard vm.windowMode != .detaching else { return event }
+
+            // Tab in chat view → enter insert mode (focus text input)
+            if event.keyCode == 48 { // Tab
+                if case .chat = vm.contentType {
+                    vm.requestChatInputFocus = true
+                    return nil
+                }
+            }
+
+            // Let ViewModel handle navigation (works in both docked and detached)
             if vm.handleKeyDown(keyCode: event.keyCode, modifiers: event.modifierFlags, sortedInstances: sorted) {
                 return nil // Consume the event
             }

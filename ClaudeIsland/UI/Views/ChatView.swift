@@ -30,6 +30,22 @@ struct ChatView: View {
         self._history = State(initialValue: cachedHistory)
         self._isLoading = State(initialValue: !alreadyLoaded)
         self._hasLoadedOnce = State(initialValue: alreadyLoaded)
+
+        // Pre-compute turn split so the first body evaluation doesn't pay for it
+        if alreadyLoaded {
+            if let splitIdx = cachedHistory.lastIndex(where: {
+                if case .user = $0.type { return true }
+                return false
+            }) {
+                self._cachedPreviousTurn = State(initialValue: Array(cachedHistory[...splitIdx]))
+                let current = Array(cachedHistory[(splitIdx + 1)...])
+                self._cachedCurrentTurn = State(initialValue: current)
+                self._cachedCurrentTurnReversed = State(initialValue: current.reversed())
+            } else {
+                self._cachedCurrentTurn = State(initialValue: cachedHistory)
+                self._cachedCurrentTurnReversed = State(initialValue: cachedHistory.reversed())
+            }
+        }
     }
 
     // MARK: Internal
@@ -88,6 +104,7 @@ struct ChatView: View {
             // Check if already loaded (from previous visit)
             if ChatHistoryManager.shared.isLoaded(sessionID: self.sessionID) {
                 self.history = ChatHistoryManager.shared.history(for: self.sessionID)
+                self.updateTurnSplit()
                 self.isLoading = false
                 return
             }
@@ -95,6 +112,7 @@ struct ChatView: View {
             // Load in background, show loading state
             await ChatHistoryManager.shared.loadFromFile(sessionID: self.sessionID, cwd: self.session.cwd)
             self.history = ChatHistoryManager.shared.history(for: self.sessionID)
+            self.updateTurnSplit()
 
             withAnimation(.easeOut(duration: 0.2)) {
                 self.isLoading = false
@@ -115,6 +133,7 @@ struct ChatView: View {
                 }
 
                 self.history = newHistory
+                self.updateTurnSplit()
 
                 // Auto-scroll to bottom only if autoscroll is NOT paused
                 if !self.isAutoscrollPaused && countChanged {
@@ -233,15 +252,15 @@ struct ChatView: View {
     @State private var scrollbarHideTask: Task<Void, Never>?
     /// Whether the mini scrollbar is currently visible.
     @State private var isScrollbarVisible = false
-    /// Measured natural height of the current-turn content (LazyVStack + padding).
-    /// Used to shrink the bottom section to its content height when there are previous turns above,
-    /// capped at `currentTurnMaxRatio * containerHeight`.
-    @State private var currentTurnContentHeight: CGFloat = 0
-    /// Measured available height of the messageList container, captured via a non-greedy
-    /// `.background` GeometryReader. We can't use a top-level GeometryReader for this because
-    /// GeometryReader is greedy with vertical space inside a VStack and was pushing the
-    /// approval/input bar below the visible area of the notch panel.
-    @State private var messageListAvailableHeight: CGFloat = 0
+    /// Cached turn split — recomputed only when `history` changes, not on every body evaluation.
+    @State private var cachedPreviousTurn: [ChatHistoryItem] = []
+    @State private var cachedCurrentTurn: [ChatHistoryItem] = []
+    /// Pre-reversed current turn items for the inverted scroll ForEach.
+    @State private var cachedCurrentTurnReversed: [ChatHistoryItem] = []
+
+    /// Ratio of the previous-turns section to total message area (0.15–0.85).
+    @State private var splitRatio: Double = AppSettings.chatSplitRatio
+    @State private var isDividerHovered = false
 
     // MARK: - Header
 
@@ -287,41 +306,8 @@ struct ChatView: View {
         return ""
     }
 
-    /// Split history so that the full chat transcript — including the most recent
-    /// user message — lives in the top section, and only the post-user tail
-    /// (assistant/tool/thinking items produced in response to that user message)
-    /// lives in the inverted bottom section.
-    ///
-    /// `previous` = `history[...lastUserIdx]` — everything up to and **including** the last user message.
-    /// `current`  = `history[(lastUserIdx + 1)...]` — the live tail that comes after it.
-    ///
-    /// When there is no user message at all, we fall back to the old behavior:
-    /// everything goes to `current` so nothing in the transcript is lost.
-    private var turnSplit: (previous: [ChatHistoryItem], current: [ChatHistoryItem]) {
-        guard let splitIdx = self.history.lastIndex(where: {
-            if case .user = $0.type { return true }
-            return false
-        })
-        else {
-            return (previous: [], current: self.history)
-        }
-        return (
-            previous: Array(self.history[...splitIdx]),
-            current: Array(self.history[(splitIdx + 1)...]),
-        )
-    }
-
-    /// Maximum fraction of the messageList's height that the current-turn section
-    /// is allowed to consume when there are previous turns above it.
-    private var currentTurnMaxRatio: CGFloat {
-        0.7
-    }
-
-    /// Minimum height of the current-turn section (prevents it from collapsing
-    /// to 0 before the first `onGeometryChange` fires).
-    private var currentTurnMinHeight: CGFloat {
-        120
-    }
+    // Turn split is cached in @State properties: cachedPreviousTurn, cachedCurrentTurn,
+    // cachedCurrentTurnReversed. Updated by updateTurnSplit() on history changes.
 
     // MARK: - Input Bar
 
@@ -405,58 +391,65 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private let dividerHeight: CGFloat = 8
+
     private var messageList: some View {
-        VStack(spacing: 0) {
-            // Top: previous turns (natural chronological order).
-            // Only rendered when there is at least one prior turn.
-            if !self.turnSplit.previous.isEmpty {
-                self.previousTurnsList
-                    .frame(maxHeight: .infinity)
+        GeometryReader { geo in
+            let total = geo.size.height
+            let hasPrevious = !self.cachedPreviousTurn.isEmpty
 
-                // Separator between the two sections. Kept subtle but
-                // clearly visible against the pure-black chat background.
-                Rectangle()
-                    .fill(Color.white.opacity(0.22))
-                    .frame(height: 1)
-            }
+            VStack(spacing: 0) {
+                if hasPrevious {
+                    self.previousTurnsList
+                        .frame(height: total * self.splitRatio)
 
-            // Bottom: current turn (inverted scroll, keeps existing behavior).
-            // When there are previous turns above, the current-turn section is
-            // sized to its natural content height (measured via onGeometryChange),
-            // capped between `currentTurnMinHeight` and `currentTurnMaxRatio * containerH`.
-            // When there are no previous turns, it fills the whole area as before.
-            self.currentTurnList
-                .frame(
-                    maxHeight: self.turnSplit.previous.isEmpty
-                        ? .infinity
-                        : min(
-                            max(self.currentTurnMinHeight, self.currentTurnContentHeight),
-                            max(self.currentTurnMinHeight, self.messageListAvailableHeight * self.currentTurnMaxRatio),
-                        ),
-                )
-        }
-        // Read the messageList's available height via a non-greedy background GeometryReader.
-        // Doing this in `.background` is critical: a top-level GeometryReader here would compete
-        // for vertical space with the approval/input bar in the parent VStack and clip the bar
-        // off the bottom of the notch panel (which uses `.frame(maxHeight:, alignment: .top)`).
-        .background(
-            GeometryReader { geo in
-                Color.clear
-                    .preference(key: MessageListHeightPreferenceKey.self, value: geo.size.height)
-            },
-        )
-        .onPreferenceChange(MessageListHeightPreferenceKey.self) { newHeight in
-            if abs(newHeight - self.messageListAvailableHeight) > 0.5 {
-                self.messageListAvailableHeight = newHeight
+                    // Draggable divider: thin lines on sides, grip block in center
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(Color.white.opacity(self.isDividerHovered ? 0.3 : 0.18))
+                            .frame(height: 1)
+                        // Center grip block
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.white.opacity(self.isDividerHovered ? 0.2 : 0.12))
+                            .frame(width: 52, height: self.dividerHeight)
+                            .overlay {
+                                VStack(spacing: 2) {
+                                    ForEach(0 ..< 3, id: \.self) { _ in
+                                        RoundedRectangle(cornerRadius: 0.5)
+                                            .fill(Color.white.opacity(self.isDividerHovered ? 0.7 : 0.45))
+                                            .frame(width: 24, height: 1)
+                                    }
+                                }
+                            }
+                        Rectangle()
+                            .fill(Color.white.opacity(self.isDividerHovered ? 0.3 : 0.18))
+                            .frame(height: 1)
+                    }
+                    .frame(height: self.dividerHeight)
+                    .contentShape(Rectangle())
+                        .onHover { self.isDividerHovered = $0 }
+                        .gesture(
+                            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                                .onChanged { value in
+                                    // Convert global Y to ratio within the container
+                                    let containerMinY = geo.frame(in: .global).minY
+                                    let localY = value.location.y - containerMinY
+                                    let newRatio = Double(localY / total)
+                                    self.splitRatio = min(0.85, max(0.15, newRatio))
+                                }
+                                .onEnded { _ in
+                                    AppSettings.chatSplitRatio = self.splitRatio
+                                }
+                        )
+
+                    self.currentTurnList
+                        .frame(height: total * (1 - self.splitRatio) - self.dividerHeight)
+                } else {
+                    self.currentTurnList
+                        .frame(maxHeight: .infinity)
+                }
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: self.turnSplit.previous.isEmpty)
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: self.currentTurnContentHeight)
-        // Enable mouse text selection (and Cmd+C copy) for all Text descendants in the
-        // message list. SwiftUI Text is non-selectable by default; `.textSelection` is
-        // an environment-propagated modifier, so applying it once here covers
-        // MarkdownText, code blocks, thinking blocks, and tool-call output without
-        // touching individual renderers.
         .textSelection(.enabled)
     }
 
@@ -536,29 +529,24 @@ struct ChatView: View {
         ) { self.focusTerminal() }
     }
 
-    /// Natural chronological scroll of previous-turn items.
-    /// Uses `defaultScrollAnchor(.bottom)` so when previous turns overflow the
-    /// upper area, the most recent (closest to current turn) is visible against
-    /// the divider, and the user scrolls up for older turns.
+    /// Inverted scroll for previous turns (last ~30 items).
+    /// The flip trick keeps content pinned to the divider: when the section
+    /// shrinks, old messages disappear from the top, not the bottom.
     private var previousTurnsList: some View {
-        let items = self.turnSplit.previous
+        let items = self.cachedPreviousTurn.suffix(30)
         return ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(spacing: 16) {
-                ForEach(items) { item in
+                ForEach(items.reversed()) { item in
                     MessageItemView(item: item, sessionID: self.sessionID)
                         .padding(.horizontal, 16)
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.98)),
-                            removal: .opacity,
-                        ))
+                        .scaleEffect(x: 1, y: -1)
                 }
             }
-            .padding(.top, 20)
-            .padding(.bottom, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 20)
             .frame(maxWidth: .infinity, alignment: .top)
-            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: items.count)
         }
-        .defaultScrollAnchor(.bottom)
+        .scaleEffect(x: 1, y: -1)
     }
 
     /// Inverted scroll view for the current (active) turn.
@@ -571,34 +559,30 @@ struct ChatView: View {
     /// here is intentionally long because it chains many scroll-related modifiers
     /// that all need access to the same `ScrollViewReader` proxy.
     private var currentTurnList: some View {
-        let items = self.turnSplit.current
+        let items = self.cachedCurrentTurn
         return ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 self.currentTurnContent(items: items)
             }
             .scaleEffect(x: 1, y: -1)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                // Check if we're near the top of the content (which is bottom in inverted view)
-                // contentOffset.y near 0 means at bottom, larger means scrolled up
-                geometry.contentOffset.y < 50
-            } action: { wasAtBottom, isNowAtBottom in
-                if wasAtBottom && !isNowAtBottom {
-                    // User scrolled away from bottom
-                    self.pauseAutoscroll()
-                } else if !wasAtBottom && isNowAtBottom && self.isAutoscrollPaused {
-                    // User scrolled back to bottom
-                    self.resumeAutoscroll()
-                }
-            }
+            // Single combined scroll geometry handler — merging two separate handlers
+            // fixes "OnScrollGeometryChange tried to update multiple times per frame".
             .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
                 let maxOffset = geometry.contentSize.height - geometry.containerSize.height
                 let fraction = maxOffset > 0
                     ? min(1, max(0, geometry.contentOffset.y / maxOffset)) : 0
                 let visible = geometry.contentSize.height > 0
                     ? min(1, geometry.containerSize.height / geometry.contentSize.height) : 1
-                return ScrollMetrics(fraction: fraction, visible: visible)
-            } action: { _, metrics in
-                // Only update when change exceeds threshold to avoid per-frame SwiftUI re-renders
+                let isAtBottom = geometry.contentOffset.y < 50
+                return ScrollMetrics(fraction: fraction, visible: visible, isAtBottom: isAtBottom)
+            } action: { oldMetrics, metrics in
+                // Autoscroll pause/resume detection
+                if oldMetrics.isAtBottom && !metrics.isAtBottom {
+                    self.pauseAutoscroll()
+                } else if !oldMetrics.isAtBottom && metrics.isAtBottom && self.isAutoscrollPaused {
+                    self.resumeAutoscroll()
+                }
+                // Only update scrollbar when change exceeds threshold to avoid per-frame re-renders
                 if abs(metrics.fraction - self.scrollFraction) > 0.005 {
                     self.scrollFraction = metrics.fraction
                 }
@@ -674,7 +658,7 @@ struct ChatView: View {
                     ))
             }
 
-            ForEach(items.reversed()) { item in
+            ForEach(self.cachedCurrentTurnReversed) { item in
                 MessageItemView(item: item, sessionID: self.sessionID)
                     .padding(.horizontal, 16)
                     .scaleEffect(x: 1, y: -1)
@@ -692,17 +676,7 @@ struct ChatView: View {
         .padding(.top, 20)
         .padding(.bottom, 20)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: self.isProcessing)
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: items.count)
         .background(NSScrollViewIdentifierTagger(identifier: Self.currentTurnScrollViewID))
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.height
-        } action: { newHeight in
-            // Track the natural (intrinsic) height of the current-turn content
-            // so the parent `messageList` can shrink this section to fit.
-            if abs(newHeight - self.currentTurnContentHeight) > 0.5 {
-                self.currentTurnContentHeight = newHeight
-            }
-        }
     }
 
     // MARK: - Image Preview
@@ -817,7 +791,7 @@ struct ChatView: View {
     /// the start of the current turn — the previous-turns section above has its own
     /// independent scroll and is not affected by these keyboard commands.
     private func jumpToUserMessage(direction: JumpDirection, proxy: ScrollViewProxy) {
-        let currentItems = self.turnSplit.current
+        let currentItems = self.cachedCurrentTurn
         let userItems = currentItems.enumerated().filter {
             if case .user = $0.element.type { return true }
             return false
@@ -860,6 +834,25 @@ struct ChatView: View {
     // MARK: - Autoscroll Management
 
     /// Pause autoscroll (user scrolled away from bottom)
+    /// Recompute and cache the turn split from `history`.
+    /// Called once from `.onAppear` and once per `.onChange(of: history)`.
+    private func updateTurnSplit() {
+        guard let splitIdx = self.history.lastIndex(where: {
+            if case .user = $0.type { return true }
+            return false
+        })
+        else {
+            self.cachedPreviousTurn = []
+            self.cachedCurrentTurn = self.history
+            self.cachedCurrentTurnReversed = self.history.reversed()
+            return
+        }
+        self.cachedPreviousTurn = Array(self.history[...splitIdx])
+        let current = Array(self.history[(splitIdx + 1)...])
+        self.cachedCurrentTurn = current
+        self.cachedCurrentTurnReversed = current.reversed()
+    }
+
     private func pauseAutoscroll() {
         self.isAutoscrollPaused = true
         self.previousHistoryCount = self.history.count
@@ -1815,6 +1808,7 @@ struct NewMessagesIndicator: View {
 private struct ScrollMetrics: Equatable {
     var fraction: CGFloat
     var visible: CGFloat
+    var isAtBottom: Bool
 }
 
 // MARK: - MiniScrollbar
@@ -1913,19 +1907,5 @@ struct NSScrollViewIdentifierTagger: NSViewRepresentable {
         // MARK: Private
 
         private let targetIdentifier: NSUserInterfaceItemIdentifier
-    }
-}
-
-// MARK: - MessageListHeightPreferenceKey
-
-/// Carries the messageList container's measured height up the view tree without
-/// influencing layout. Set inside a `.background { GeometryReader }` and consumed
-/// via `.onPreferenceChange` so the current-turn cap can be expressed as a fraction
-/// of the available message-list height.
-private struct MessageListHeightPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }

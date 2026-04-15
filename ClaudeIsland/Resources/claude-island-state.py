@@ -18,6 +18,7 @@ __all__ = [
     "ToolExtras",
     "ToolInputType",
     "determine_status",
+    "emit_warp_cli_agent_event",
     "get_claude_pid",
     "get_tty",
     "handle_permission_response",
@@ -28,6 +29,7 @@ __all__ = [
     "send_event",
     "get_git_info",
     "get_terminal_tty",
+    "should_emit_warp_cli_agent",
     "update_tab_title",
     "validate_tty",
 ]
@@ -100,6 +102,181 @@ ToolInputType = dict[str, str | int | bool | list[str] | None]
 SOCKET_PATH = Path("/tmp/claude-island.sock")
 CONNECT_TIMEOUT_SECONDS = 5  # Fast-fail if app is unresponsive
 PERMISSION_RECV_TIMEOUT_SECONDS = 300  # Must match Swift's permissionTimeoutSeconds
+
+# --- Warp CLI Agent integration ---
+#
+# Reference: https://github.com/anthropics/claude-code/tree/main/plugins/warp
+# Protocol: OSC 777 ; notify ; warp://cli-agent ; <json-body> BEL
+# Warp's CLI Agent subsystem consumes these frames to render a tab status dot,
+# post a native macOS notification, and mark the tab as "wakeable" so
+# Shift+Cmd+G can jump to it.
+WARP_CLI_AGENT_TITLE = "warp://cli-agent"
+WARP_PROTOCOL_VERSION = 1
+
+# Hook config file written by the Swift app (AppSettings → HookConfigWriter).
+# Absent / unreadable file means: defaults (mode = "both", warp emit enabled).
+HOOK_CONFIG_PATH = Path.home() / ".claude" / ".claude-island-hook-config.json"
+
+# Status (from `determine_status`) → CLI Agent event name. Events not in this
+# map are intentionally not forwarded to Warp (e.g. "notification", "skip",
+# "unknown") — they have no useful Warp-side semantics.
+STATUS_TO_CLI_AGENT_EVENT: dict[str, str] = {
+    "processing": "user_prompt_submit",
+    "running_tool": "post_tool_use",
+    "waiting_for_input": "idle_prompt",
+    "waiting_for_approval": "permission_request",
+    "compacting": "user_prompt_submit",  # Visually keep "running"
+    "ended": "stop",
+}
+
+# Phase 4: known-bad Warp versions where the CLI Agent path misbehaves.
+# Add entries here to silently downgrade affected users to OSC 0 only.
+# Match against TERM_PROGRAM_VERSION exactly. Remove once Warp ships a fix.
+WARP_BAD_VERSIONS: frozenset[str] = frozenset()
+
+# Stderr log prefix — Claude Code captures hook stderr, makes it greppable.
+_LOG_PREFIX = "[claude-island/warp]"
+
+
+def _log_warp(msg: str, /) -> None:
+    """Best-effort stderr log for Warp CLI Agent path diagnostics."""
+    try:
+        print(f"{_LOG_PREFIX} {msg}", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
+def _load_hook_config() -> dict[str, object]:
+    """Load Swift-managed hook config (warp mode, etc).
+
+    Returns an empty dict if the file is missing, unreadable, or invalid —
+    callers must treat all keys as optional.
+    """
+    try:
+        with open(HOOK_CONFIG_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return cast(dict[str, object], raw)
+
+
+def should_emit_warp_cli_agent() -> bool:
+    """Gate: only emit when running inside Warp with a known-good version
+    AND the user has not opted out via Settings (mode != "island-only").
+    """
+    if os.environ.get("TERM_PROGRAM") != "WarpTerminal":
+        return False
+
+    # Protocol version is advertised by Warp itself — absence means too old.
+    if not os.environ.get("WARP_CLI_AGENT_PROTOCOL_VERSION"):
+        return False
+
+    # Phase 4: skip known-bad Warp versions.
+    warp_version = os.environ.get("TERM_PROGRAM_VERSION", "")
+    if warp_version in WARP_BAD_VERSIONS:
+        _log_warp(f"skip: blacklisted Warp version {warp_version!r}")
+        return False
+
+    # Swift-side toggle (Phase 3). Mode == "island-only" disables OSC 777.
+    cfg = _load_hook_config()
+    mode = cfg.get("warpCLIAgentMode")
+    if mode == "island-only":
+        return False
+    enabled = cfg.get("warpCLIAgentEnabled")
+    # `enabled` defaults to True; only an explicit `False` opts out.
+    if enabled is False:
+        return False
+
+    return True
+
+
+def _permission_summary(state: "SessionState", /) -> str:
+    """Build a short, user-readable summary line for permission_request events.
+
+    Mirrors the conventions used by claude-code-warp/build-payload.sh —
+    "Run Bash: <cmd>", "Edit: <path>", etc.
+    """
+    tool = state.tool or "tool"
+    tool_input = state.tool_input or {}
+
+    if tool == "Bash":
+        cmd = tool_input.get("command")
+        if isinstance(cmd, str) and cmd:
+            short = cmd if len(cmd) <= 80 else cmd[:77] + "..."
+            return f"Run Bash: {short}"
+    if tool in {"Edit", "Write", "Read", "NotebookEdit"}:
+        path = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if isinstance(path, str) and path:
+            return f"{tool}: {path}"
+    if tool == "WebFetch":
+        url = tool_input.get("url")
+        if isinstance(url, str) and url:
+            return f"WebFetch: {url}"
+
+    return f"Use {tool}"
+
+
+def emit_warp_cli_agent_event(
+    state: "SessionState",
+    terminal_tty: str | None,
+    /,
+) -> None:
+    """Write an OSC 777 `warp://cli-agent` frame to the terminal TTY.
+
+    Tab membership is determined by Warp from the pty master fd holding the
+    terminal_tty — we do not need to (and cannot) name the tab in the payload.
+
+    Silent on every failure path: a missing TTY, closed file descriptor, or
+    permission error must not break the hook flow. Diagnostics go to stderr
+    via `_log_warp` only when the path is genuinely interesting.
+    """
+    if not terminal_tty:
+        return
+    if not should_emit_warp_cli_agent():
+        return
+
+    cli_event = STATUS_TO_CLI_AGENT_EVENT.get(state.status)
+    if not cli_event:
+        return
+
+    # Negotiate protocol version (min of plugin & Warp).
+    try:
+        warp_v = int(os.environ.get("WARP_CLI_AGENT_PROTOCOL_VERSION", "1"))
+    except ValueError:
+        warp_v = 1
+    version = min(WARP_PROTOCOL_VERSION, warp_v)
+
+    project = Path(state.cwd).name if state.cwd else "unknown"
+    payload: dict[str, object] = {
+        "v": version,
+        "agent": "claude",
+        "event": cli_event,
+        "session_id": state.session_id,
+        "cwd": state.cwd,
+        "project": project,
+    }
+
+    # Per-event enrichment (mirrors build-payload.sh conventions).
+    if cli_event == "permission_request":
+        payload["tool_name"] = state.tool or ""
+        payload["tool_input"] = state.tool_input or {}
+        payload["summary"] = _permission_summary(state)
+    elif cli_event == "post_tool_use":
+        payload["tool_name"] = state.tool or ""
+    elif cli_event == "idle_prompt":
+        payload["summary"] = state.message or "Claude is waiting for input"
+
+    body = json.dumps(payload, separators=(",", ":"))
+    frame = f"\033]777;notify;{WARP_CLI_AGENT_TITLE};{body}\007"
+    try:
+        with open(terminal_tty, "w") as f:
+            f.write(frame)
+    except OSError as exc:
+        # Common cases: tty closed, /dev permission lost. Don't spam stderr —
+        # these are routine when sessions tear down. Log once at debug-ish level.
+        _log_warp(f"emit failed for {terminal_tty}: {exc.__class__.__name__}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -718,6 +895,11 @@ def main() -> None:
         git_branch=git_branch,
         git_is_worktree=git_is_worktree,
     )
+
+    # Forward to Warp's CLI Agent subsystem (no-op outside Warp).
+    # Runs *before* send_event so the tab status dot updates even if the
+    # ClaudeIsland app socket is unreachable.
+    emit_warp_cli_agent_event(state, terminal_tty)
 
     # Send to ClaudeIsland.app
     response = send_event(state)

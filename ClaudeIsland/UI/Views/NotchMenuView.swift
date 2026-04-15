@@ -138,6 +138,11 @@ struct NotchMenuView: View {
 
                         AccessibilityRow(accessibilityManager: self.accessibilityManager)
 
+                        WarpIntegrationRow(
+                            warpEnabled: self.$warpCLIAgentEnabled,
+                            warpMode: self.$warpCLIAgentMode,
+                        )
+
                         MenuToggleRow(
                             icon: "text.alignleft",
                             label: "Verbose Mode",
@@ -210,6 +215,8 @@ struct NotchMenuView: View {
     @State private var showWhatsNew = false
     @State private var showLayoutSettings = false
     @State private var navigationStyle: NavigationStyle = AppSettings.navigationStyle
+    @State private var warpCLIAgentEnabled: Bool = AppSettings.warpCLIAgentEnabled
+    @State private var warpCLIAgentMode: WarpNotificationMode = AppSettings.warpCLIAgentNotificationMode
     // swiftformat:disable:next wrapAttributes
     @AppStorage("notchAutoExpand")
     private var notchAutoExpand = false
@@ -846,6 +853,92 @@ struct TokenTrackingRow: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - NavigationStyleRow
+
+// MARK: - WarpIntegrationRow
+
+/// Two-line preference row for Warp CLI Agent integration: a master toggle
+/// + a 3-way Picker controlling who owns the "needs attention" notification.
+/// Picker is disabled when the master toggle is off.
+struct WarpIntegrationRow: View {
+    // MARK: Internal
+
+    @Binding var warpEnabled: Bool
+    @Binding var warpMode: WarpNotificationMode
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Row 1: master toggle.
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.dashed.badge.record")
+                    .font(.system(size: 12))
+                    .foregroundColor(self.textColor)
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Warp CLI Agent")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(self.textColor)
+                    Text("OSC 777 frames + Shift+Cmd+G tab jump")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+
+                Spacer()
+
+                Toggle("", isOn: self.$warpEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .onChange(of: self.warpEnabled) { _, newValue in
+                        AppSettings.warpCLIAgentEnabled = newValue
+                    }
+            }
+
+            // Row 2: notification ownership picker.
+            HStack(spacing: 10) {
+                Spacer().frame(width: 16)
+
+                Text("Notify via")
+                    .font(.system(size: 12))
+                    .foregroundColor(self.textColor.opacity(0.85))
+
+                Spacer()
+
+                Picker("", selection: self.$warpMode) {
+                    ForEach(WarpNotificationMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 220)
+                .disabled(!self.warpEnabled)
+                .opacity(self.warpEnabled ? 1.0 : 0.4)
+                .onChange(of: self.warpMode) { _, newValue in
+                    AppSettings.warpCLIAgentNotificationMode = newValue
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(self.isHovered ? Color.white.opacity(0.08) : Color.clear),
+        )
+        .contentShape(Rectangle())
+        .onHover { self.isHovered = $0 }
+    }
+
+    // MARK: Private
+
+    @State private var isHovered = false
+
+    private var textColor: Color {
+        .white.opacity(self.isHovered ? 1.0 : 0.7)
     }
 }
 

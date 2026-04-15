@@ -55,6 +55,47 @@ enum RingDisplay: String, CaseIterable {
     }
 }
 
+// MARK: - WarpNotificationMode
+
+/// Where the user wants Warp-related notifications to come from.
+///
+/// Only meaningful when running inside Warp Terminal — for other terminals
+/// this setting is silently a no-op.
+enum WarpNotificationMode: String, CaseIterable {
+    /// Both Claude Island (sound + notch) and Warp's native banner fire.
+    case both = "Both"
+    /// Suppress Claude Island's notification sound — let Warp's banner own
+    /// the "needs attention" channel. Notch UI still updates.
+    case warpOnly = "Warp Only"
+    /// Don't emit OSC 777 frames at all. Claude Island stays the sole notifier.
+    case islandOnly = "Island Only"
+
+    // MARK: Internal
+
+    /// String value written to the hook config file (reads must match Python keys).
+    var hookConfigValue: String {
+        switch self {
+        case .both:
+            "both"
+        case .warpOnly:
+            "warp-only"
+        case .islandOnly:
+            "island-only"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .both:
+            "Claude Island sound + Warp native banner"
+        case .warpOnly:
+            "Warp banner only — Island stays silent"
+        case .islandOnly:
+            "Claude Island only — no Warp banner"
+        }
+    }
+}
+
 // MARK: - SoundSuppression
 
 /// Sound suppression modes for notification sounds
@@ -316,6 +357,40 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: Keys.isNotchLocked) }
     }
 
+    // MARK: - Warp CLI Agent Integration
+
+    /// Whether to forward hook events to Warp's CLI Agent subsystem (OSC 777).
+    /// Default `true` — the Python hook gates on TERM_PROGRAM=WarpTerminal,
+    /// so this toggle is a no-op outside Warp.
+    static var warpCLIAgentEnabled: Bool {
+        get {
+            if defaults.object(forKey: Keys.warpCLIAgentEnabled) == nil {
+                return true
+            }
+            return defaults.bool(forKey: Keys.warpCLIAgentEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.warpCLIAgentEnabled)
+            HookConfigWriter.persist()
+        }
+    }
+
+    /// How Warp banner / Island sound notifications divide the work.
+    static var warpCLIAgentNotificationMode: WarpNotificationMode {
+        get {
+            guard let raw = defaults.string(forKey: Keys.warpCLIAgentNotificationMode),
+                  let mode = WarpNotificationMode(rawValue: raw)
+            else {
+                return .both
+            }
+            return mode
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.warpCLIAgentNotificationMode)
+            HookConfigWriter.persist()
+        }
+    }
+
     // MARK: - Chat Split Ratio
 
     /// The ratio of previous turns section height to total chat message area (0.15–0.85).
@@ -350,6 +425,8 @@ enum AppSettings {
         static let navigationStyle = "navigationStyle"
         static let enableTabFlashOnFocus = "enableTabFlashOnFocus"
         static let chatSplitRatio = "chatSplitRatio"
+        static let warpCLIAgentEnabled = "warpCLIAgentEnabled"
+        static let warpCLIAgentNotificationMode = "warpCLIAgentNotificationMode"
     }
 
     private static let defaults = UserDefaults.standard

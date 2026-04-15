@@ -967,26 +967,7 @@ struct ChatView: View {
 
     private func focusTerminal() {
         Task(name: "focus-terminal") {
-            var activated = false
-            if let pid = session.pid {
-                activated = await TerminalFocuser.shared.focusTerminal(forClaudePID: pid)
-            }
-            if !activated {
-                activated = await TerminalFocuser.shared.focusTerminal(forWorkingDirectory: self.session.cwd)
-            }
-
-            // Flash the tab title to help user locate the correct tab
-            if activated, AppSettings.enableTabFlashOnFocus {
-                let tty = self.session.terminalTTY ?? self.session.tty
-                if let tty {
-                    await TerminalFocuser.shared.flashTabTitle(tty: tty, projectName: self.session.projectName)
-                } else {
-                    os.Logger(subsystem: "com.engels74.ClaudeIsland", category: "ChatView")
-                        .warning(
-                            "No TTY available for tab flash (terminalTTY=\(self.session.terminalTTY ?? "nil"), tty=\(self.session.tty ?? "nil"))",
-                        )
-                }
-            }
+            await TerminalFocuser.shared.focus(session: self.session)
         }
     }
 

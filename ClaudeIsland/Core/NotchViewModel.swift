@@ -398,20 +398,7 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
         guard case let .chat(session) = contentType else { return }
         self.notchClose()
         Task(name: "focus-terminal-from-chat") {
-            var activated = false
-            if let pid = session.pid {
-                activated = await TerminalFocuser.shared.focusTerminal(forClaudePID: pid)
-            }
-            if !activated {
-                activated = await TerminalFocuser.shared.focusTerminal(forWorkingDirectory: session.cwd)
-            }
-
-            if activated, AppSettings.enableTabFlashOnFocus {
-                let tty = session.terminalTTY ?? session.tty
-                if let tty {
-                    await TerminalFocuser.shared.flashTabTitle(tty: tty, projectName: session.projectName)
-                }
-            }
+            await TerminalFocuser.shared.focus(session: session)
         }
     }
 

@@ -17,7 +17,6 @@ struct NotchGeometry: Sendable {
 
     let deviceNotchRect: CGRect
     let screenRect: CGRect
-    let windowHeight: CGFloat
 
     /// The notch rect in screen coordinates (for hit testing with global mouse position)
     var notchScreenRect: CGRect {
@@ -36,7 +35,6 @@ struct NotchGeometry: Sendable {
 
     /// The opened panel rect in screen coordinates for a given size
     func openedScreenRect(for size: CGSize) -> CGRect {
-        // Must stay in sync with NotchViewController.hitTestRect for .opened state
         let panelWidth = size.width + 52 // Account for corner radius padding
         let panelHeight = size.height
         return CGRect(

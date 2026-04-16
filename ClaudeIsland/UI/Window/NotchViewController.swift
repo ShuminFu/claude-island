@@ -8,22 +8,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - PassThroughHostingView
-
-/// Custom NSHostingView that only accepts mouse events within the panel bounds.
-/// Clicks outside the panel pass through to windows behind.
-class PassThroughHostingView<Content: View>: NSHostingView<Content> {
-    var hitTestRect: () -> CGRect = { .zero }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        // Only accept hits within the panel rect
-        guard self.hitTestRect().contains(point) else {
-            return nil // Pass through to windows behind
-        }
-        return super.hitTest(point)
-    }
-}
-
 // MARK: - NotchViewController
 
 class NotchViewController: NSViewController {
@@ -42,91 +26,13 @@ class NotchViewController: NSViewController {
     // MARK: Internal
 
     override func loadView() {
-        let hosting = PassThroughHostingView(rootView: NotchView(viewModel: viewModel))
-
-        // Calculate the hit-test rect based on panel state
-        hosting.hitTestRect = { [weak self] () -> CGRect in
-            guard let self else { return .zero }
-            let vm = self.viewModel
-            let geometry = vm.geometry
-
-            // When the notch is detached (or being dragged out), the floating
-            // DetachedPanel owns all hit-testing. Return an empty rect so the
-            // docked hosting view passes every click straight through to the
-            // window behind it — otherwise the rectangle directly under the
-            // notch (the would-be opened panel area) silently swallows clicks
-            // even when `ignoresMouseEvents` is enabled, because the SwiftUI
-            // view tree is still hit-testable at opacity 0.
-            guard vm.windowMode == .docked else {
-                return .zero
-            }
-
-            // Window coordinates: origin at bottom-left, Y increases upward
-            // The window is positioned at top of screen, so panel is at top of window
-            let windowHeight = geometry.windowHeight
-
-            switch vm.status {
-            case .opened:
-                let panelSize = vm.openedSize
-                // Panel is centered horizontally, anchored to top
-                let panelWidth = panelSize.width + 52 // Account for corner radius padding
-                let panelHeight = panelSize.height
-                let screenWidth = geometry.screenRect.width
-                return CGRect(
-                    x: (screenWidth - panelWidth) / 2,
-                    y: windowHeight - panelHeight,
-                    width: panelWidth,
-                    height: panelHeight,
-                )
-            case .closed,
-                 .popping:
-                let notchRect = geometry.deviceNotchRect
-                let screenWidth = geometry.screenRect.width
-                let totalWidth = self.closedPanelWidth(for: vm, notchRect: notchRect)
-                return CGRect(
-                    x: (screenWidth - totalWidth) / 2,
-                    y: windowHeight - notchRect.height - 5,
-                    width: totalWidth,
-                    height: notchRect.height + 10,
-                )
-            }
-        }
-
-        self.hostingView = hosting
-        view = hosting
+        // The NotchPanel is resized to exactly the visible content rect when opening,
+        // so the window boundaries themselves limit which clicks reach Claude Island.
+        // No custom hit-test rect needed.
+        view = NSHostingView(rootView: NotchView(viewModel: self.viewModel))
     }
 
     // MARK: Private
 
     private let viewModel: NotchViewModel
-    private let sessionMonitor = ClaudeSessionMonitor()
-    private var hostingView: PassThroughHostingView<NotchView>?
-
-    private var unwrappedHostingView: PassThroughHostingView<NotchView> {
-        guard let hostingView else {
-            fatalError("hostingView accessed before loadView()")
-        }
-        return hostingView
-    }
-
-    /// Closed panel width in window coordinates.
-    /// Must stay in sync with NotchView's closed-state width calculation.
-    private func closedPanelWidth(for vm: NotchViewModel, notchRect: CGRect) -> CGFloat {
-        let layout = vm.layoutEngine.computeLayout(
-            notchSize: notchRect.size,
-            isProcessing: NotchActivityCoordinator.shared.expandingActivity.show
-                && NotchActivityCoordinator.shared.expandingActivity.type == .claude,
-            hasPendingPermission: self.sessionMonitor.instances.contains { $0.phase.isWaitingForApproval },
-            hasWaitingForInput: self.sessionMonitor.instances.contains { $0.phase == .waitingForInput },
-            needsAccessibilityWarning: AccessibilityPermissionManager.shared.shouldShowPermissionWarning,
-        )
-
-        guard layout.hasAnyVisibleModule else {
-            let idleCoreWidth = max(0, notchRect.width - 20)
-            return idleCoreWidth + 2 * ModuleLayoutEngine.shapeEdgeMargin
-        }
-
-        let coreWidth = notchRect.width + layout.totalExpansionWidth
-        return coreWidth + 2 * ModuleLayoutEngine.shapeEdgeMargin
-    }
 }

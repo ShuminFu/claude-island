@@ -76,11 +76,10 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
 
     // MARK: - Initialization
 
-    init(deviceNotchRect: CGRect, screenRect: CGRect, windowHeight: CGFloat, hasPhysicalNotch: Bool) {
+    init(deviceNotchRect: CGRect, screenRect: CGRect, hasPhysicalNotch: Bool) {
         self.geometry = NotchGeometry(
             deviceNotchRect: deviceNotchRect,
             screenRect: screenRect,
-            windowHeight: windowHeight,
         )
         self.hasPhysicalNotch = hasPhysicalNotch
         self.layoutEngine = ModuleLayoutEngine(registry: self.moduleRegistry)
@@ -171,10 +170,6 @@ final class NotchViewModel { // swiftlint:disable:this type_body_length
 
     var screenRect: CGRect {
         self.geometry.screenRect
-    }
-
-    var windowHeight: CGFloat {
-        self.geometry.windowHeight
     }
 
     /// Dynamic opened size based on content type

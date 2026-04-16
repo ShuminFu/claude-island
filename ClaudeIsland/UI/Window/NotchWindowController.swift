@@ -19,13 +19,16 @@ class NotchWindowController: NSWindowController {
         let notchSize = screen.notchSize
         Self.logNotchGeometry(for: screen)
 
-        // Window covers full width at top, tall enough for largest content (chat view)
-        let windowHeight: CGFloat = 750
+        // Initial (closed) window frame — full width, enough height to cover the notch bar
+        // and any module pill expansions. ignoresMouseEvents = true while closed, so the
+        // exact size has no effect on click-through; the size is generous to avoid clipping
+        // the closed-state pill animation.
+        let closedHeight: CGFloat = 80
         let windowFrame = NSRect(
             x: screenFrame.origin.x,
-            y: screenFrame.maxY - windowHeight,
+            y: screenFrame.maxY - closedHeight,
             width: screenFrame.width,
-            height: windowHeight,
+            height: closedHeight,
         )
 
         // Device notch rect - positioned at center
@@ -40,9 +43,9 @@ class NotchWindowController: NSWindowController {
         self.viewModel = NotchViewModel(
             deviceNotchRect: deviceNotchRect,
             screenRect: screenFrame,
-            windowHeight: windowHeight,
             hasPhysicalNotch: screen.hasPhysicalNotch,
         )
+        self.closedWindowFrame = windowFrame
 
         // Create the window
         let notchWindow = NotchPanel(
@@ -54,7 +57,6 @@ class NotchWindowController: NSWindowController {
 
         super.init(window: notchWindow)
 
-        // Create the SwiftUI view with pass-through hosting
         let hostingController = NotchViewController(viewModel: viewModel)
         notchWindow.contentViewController = hostingController
 
@@ -62,13 +64,14 @@ class NotchWindowController: NSWindowController {
 
         // Start ignoring mouse events — the notch begins closed.
         // Global event monitors handle hover detection and click-to-open.
-        // When the notch opens, the status stream handler enables mouse events
-        // so interactive content (buttons, scroll views) works.
+        // When the notch opens, the window is resized to the content rect and
+        // mouse events are enabled so buttons and scroll views work.
         notchWindow.ignoresMouseEvents = true
 
         self.setupStatusStream(panel: notchWindow, viewModel: self.viewModel)
         self.setupBootAnimation(animateOnLaunch: animateOnLaunch)
         self.setupDetachableNotch(viewModel: self.viewModel)
+        self.observeDockedPanelContentSize()
     }
 
     deinit {
@@ -115,6 +118,10 @@ class NotchWindowController: NSWindowController {
 
     // MARK: Private
 
+    /// Window frame used when the notch is closed. Restored whenever the notch closes
+    /// so the next open always starts a resize from a known baseline.
+    private let closedWindowFrame: NSRect
+
     private var statusTask: Task<Void, Never>?
     private var bootAnimationTask: Task<Void, Never>?
 
@@ -134,32 +141,18 @@ class NotchWindowController: NSWindowController {
     }
 
     private func setupStatusStream(panel notchWindow: NotchPanel, viewModel: NotchViewModel) {
-        // Install the drag-header claim hook once — it reads the live view model so it
-        // covers the currently-opened panel rect (content-type toggles resize it).
-        // This prevents NotchPanel.sendEvent from reposting mouseDown events that land
-        // on the rounded-corner cutouts of the NotchShape, which would otherwise warp
-        // the hardware cursor and make drag-to-detach twitch at the very top of the screen.
-        notchWindow.shouldClaimMouseDown = { [weak viewModel] screenLocation in
-            guard let vm = viewModel, vm.status == .opened, vm.windowMode == .docked else {
-                return false
-            }
-            let panelRect = vm.geometry.openedScreenRect(for: vm.openedSize)
-            // Match NotchDragController's drag header rect (top 40pt of the opened panel)
-            // with an inclusive `maxY` check so the very top row of pixels still counts.
-            let headerMinY = panelRect.maxY - 40
-            return screenLocation.x >= panelRect.minX
-                && screenLocation.x <= panelRect.maxX
-                && screenLocation.y >= headerMinY
-                && screenLocation.y <= panelRect.maxY
-        }
-
         let statusStream = viewModel.makeStatusStream()
-        self.statusTask = Task(name: "notch-status-stream") { @MainActor [weak notchWindow, weak viewModel] in
+        self.statusTask = Task(name: "notch-status-stream") { @MainActor [weak self, weak notchWindow, weak viewModel] in
             for await status in statusStream {
                 guard let panel = notchWindow else { continue }
                 switch status {
                 case .opened:
                     panel.isContentActive = true
+                    // Resize to the visible content rect BEFORE enabling mouse events so
+                    // there is never a moment where the large closed frame is interactive.
+                    if let vm = viewModel {
+                        panel.setFrame(vm.geometry.openedScreenRect(for: vm.openedSize), display: true)
+                    }
                     panel.ignoresMouseEvents = false
                     let reason = viewModel?.openReason
                     if reason == .hotkey {
@@ -172,10 +165,40 @@ class NotchWindowController: NSWindowController {
                      .popping:
                     panel.isContentActive = false
                     panel.ignoresMouseEvents = true
+                    // Restore the closed frame so the next open starts from a clean baseline.
+                    if let closedFrame = self?.closedWindowFrame {
+                        panel.setFrame(closedFrame, display: true)
+                    }
                     panel.resignKey()
                 }
             }
         }
+    }
+
+    // MARK: - Docked panel content-size observation
+
+    /// Observe `openedSize` changes while the notch is open and docked, and resize the
+    /// NotchPanel to match — mirrors `resizeDetachedPanelForContentType` for the docked case.
+    func observeDockedPanelContentSize() {
+        withObservationTracking {
+            _ = self.viewModel.openedSize
+            _ = self.viewModel.windowMode
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                self?.resizeDockedPanelForContentType()
+                self?.observeDockedPanelContentSize()
+            }
+        }
+    }
+
+    private func resizeDockedPanelForContentType() {
+        guard self.viewModel.status == .opened,
+              self.viewModel.windowMode == .docked,
+              let panel = self.window else { return }
+        let newFrame = self.viewModel.geometry.openedScreenRect(for: self.viewModel.openedSize)
+        guard abs(panel.frame.width - newFrame.width) > 0.5 ||
+              abs(panel.frame.height - newFrame.height) > 0.5 else { return }
+        panel.setFrame(newFrame, display: true)
     }
 
     private func setupBootAnimation(animateOnLaunch: Bool) {

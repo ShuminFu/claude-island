@@ -39,6 +39,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NotRequired, TypedDict, TypeIs, cast
@@ -113,20 +114,24 @@ PERMISSION_RECV_TIMEOUT_SECONDS = 300  # Must match Swift's permissionTimeoutSec
 WARP_CLI_AGENT_TITLE = "warp://cli-agent"
 WARP_PROTOCOL_VERSION = 1
 
+# Advertised to Warp in the `session_start` handshake. Semver-ish.
+WARP_PLUGIN_VERSION = "1.0.0"
+
 # Hook config file written by the Swift app (AppSettings → HookConfigWriter).
 # Absent / unreadable file means: defaults (mode = "both", warp emit enabled).
 HOOK_CONFIG_PATH = Path.home() / ".claude" / ".claude-island-hook-config.json"
 
-# Status (from `determine_status`) → CLI Agent event name. Events not in this
-# map are intentionally not forwarded to Warp (e.g. "notification", "skip",
-# "unknown") — they have no useful Warp-side semantics.
-STATUS_TO_CLI_AGENT_EVENT: dict[str, str] = {
-    "processing": "user_prompt_submit",
-    "running_tool": "post_tool_use",
-    "waiting_for_input": "idle_prompt",
-    "waiting_for_approval": "permission_request",
-    "compacting": "user_prompt_submit",  # Visually keep "running"
-    "ended": "stop",
+# Claude Code hook event → Warp CLI Agent event. One-to-one with the official
+# `claude-code-warp` plugin's hooks.json. Events outside this map are
+# intentionally not forwarded (SessionEnd, SubagentStop, PreCompact) — they
+# have no official Warp-side semantics and silently desynchronize the tab.
+HOOK_EVENT_TO_CLI_AGENT: dict[str, str] = {
+    "SessionStart": "session_start",
+    "UserPromptSubmit": "prompt_submit",
+    "PostToolUse": "tool_complete",
+    "PreToolUse": "permission_request",
+    "Notification": "idle_prompt",
+    "Stop": "stop",
 }
 
 # Phase 4: known-bad Warp versions where the CLI Agent path misbehaves.
@@ -218,9 +223,73 @@ def _permission_summary(state: "SessionState", /) -> str:
     return f"Use {tool}"
 
 
+def _truncate(text: str, limit: int = 200, /) -> str:
+    """Cap a string to `limit` chars with a trailing ellipsis when truncated."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _extract_stop_context(transcript_path: str, /) -> tuple[str, str]:
+    """Read the transcript JSONL and pull the last user query + assistant response.
+
+    Mirrors the jq logic in `claude-code-warp/on-stop.sh`:
+      - Sleep briefly so Claude Code finishes flushing the current turn.
+      - User messages include both human prompts and tool results; we keep only
+        entries whose content is a plain string OR contains a {"type":"text"} block.
+      - Assistant messages: join all text blocks.
+      - Truncate each to 200 chars for the notification body.
+    """
+    if not transcript_path:
+        return "", ""
+    path = Path(transcript_path)
+    if not path.is_file():
+        return "", ""
+    time.sleep(0.3)
+    try:
+        with path.open(encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return "", ""
+
+    def _text_blocks(content: object) -> list[str]:
+        if not isinstance(content, list):
+            return []
+        return [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+
+    query = ""
+    response = ""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        msg_type = msg.get("type")
+        inner = msg.get("message")
+        content: object = inner.get("content") if isinstance(inner, dict) else None
+        if msg_type == "user":
+            if isinstance(content, str):
+                query = content
+            else:
+                texts = _text_blocks(content)
+                if texts:
+                    query = " ".join(texts)
+        elif msg_type == "assistant":
+            texts = _text_blocks(content)
+            if texts:
+                response = " ".join(texts)
+    return _truncate(query), _truncate(response)
+
+
 def emit_warp_cli_agent_event(
     state: "SessionState",
     terminal_tty: str | None,
+    raw_data: "HookEventData | None" = None,
     /,
 ) -> None:
     """Write an OSC 777 `warp://cli-agent` frame to the terminal TTY.
@@ -228,17 +297,25 @@ def emit_warp_cli_agent_event(
     Tab membership is determined by Warp from the pty master fd holding the
     terminal_tty — we do not need to (and cannot) name the tab in the payload.
 
-    Silent on every failure path: a missing TTY, closed file descriptor, or
-    permission error must not break the hook flow. Diagnostics go to stderr
-    via `_log_warp` only when the path is genuinely interesting.
+    Dispatches on `state.event` (the Claude Code hook event name) to build
+    the event-specific payload that Warp's CLI Agent parser expects. The
+    `raw_data` is the original hook input; it's the only source for fields
+    like `prompt` (UserPromptSubmit) and `transcript_path` (Stop).
+
+    Silent on every failure path.
     """
     if not terminal_tty:
         return
     if not should_emit_warp_cli_agent():
         return
 
-    cli_event = STATUS_TO_CLI_AGENT_EVENT.get(state.status)
+    cli_event = HOOK_EVENT_TO_CLI_AGENT.get(state.event)
     if not cli_event:
+        return
+
+    # `stop_hook_active` is set when Claude Code is already running its
+    # stop-hook chain; re-firing would cause double-notifications.
+    if cli_event == "stop" and raw_data and raw_data.get("stop_hook_active"):
         return
 
     # Negotiate protocol version (min of plugin & Warp).
@@ -258,15 +335,31 @@ def emit_warp_cli_agent_event(
         "project": project,
     }
 
-    # Per-event enrichment (mirrors build-payload.sh conventions).
-    if cli_event == "permission_request":
+    # Per-event enrichment. Field names + shapes match claude-code-warp
+    # build-payload.sh / on-*.sh exactly — Warp parses by key.
+    if cli_event == "session_start":
+        payload["plugin_version"] = WARP_PLUGIN_VERSION
+    elif cli_event == "prompt_submit":
+        prompt = (raw_data or {}).get("prompt") or ""
+        payload["query"] = _truncate(prompt) if isinstance(prompt, str) else ""
+    elif cli_event == "tool_complete":
+        payload["tool_name"] = state.tool or ""
+    elif cli_event == "permission_request":
         payload["tool_name"] = state.tool or ""
         payload["tool_input"] = state.tool_input or {}
         payload["summary"] = _permission_summary(state)
-    elif cli_event == "post_tool_use":
-        payload["tool_name"] = state.tool or ""
     elif cli_event == "idle_prompt":
         payload["summary"] = state.message or "Claude is waiting for input"
+    elif cli_event == "stop":
+        transcript_path = ""
+        if raw_data:
+            tp = raw_data.get("transcript_path")
+            if isinstance(tp, str):
+                transcript_path = tp
+        query, response = _extract_stop_context(transcript_path)
+        payload["query"] = query
+        payload["response"] = response
+        payload["transcript_path"] = transcript_path
 
     body = json.dumps(payload, separators=(",", ":"))
     frame = f"\033]777;notify;{WARP_CLI_AGENT_TITLE};{body}\007"
@@ -899,7 +992,7 @@ def main() -> None:
     # Forward to Warp's CLI Agent subsystem (no-op outside Warp).
     # Runs *before* send_event so the tab status dot updates even if the
     # ClaudeIsland app socket is unreachable.
-    emit_warp_cli_agent_event(state, terminal_tty)
+    emit_warp_cli_agent_event(state, terminal_tty, data)
 
     # Send to ClaudeIsland.app
     response = send_event(state)

@@ -66,104 +66,86 @@ claude-island-state.py
 ```python
 WARP_CLI_AGENT_TITLE = "warp://cli-agent"
 WARP_PROTOCOL_VERSION = 1
+WARP_PLUGIN_VERSION = "1.0.0"  # advertised in the session_start handshake
 
-# status → CLI Agent event 名称
-STATUS_TO_CLI_AGENT_EVENT: dict[str, str] = {
-    "session_start":         "session_start",
-    "processing":            "user_prompt_submit",
-    "running_tool":          "post_tool_use",
-    "waiting_for_input":     "idle_prompt",
-    "waiting_for_approval":  "permission_request",
-    "compacting":            "user_prompt_submit",   # 视觉上保持 running
-    "ended":                 "stop",
+# Claude Code hook event → CLI Agent event. One-to-one with the official
+# warpdotdev/claude-code-warp plugin's hooks.json. Dispatch by hook event
+# (not by our internal status) because Warp's parser expects an exact
+# event name per payload — e.g. `Stop` must emit `stop` (with query /
+# response / transcript_path), NOT `idle_prompt`, or Warp silently drops
+# the frame and the tab never becomes "wakeable".
+HOOK_EVENT_TO_CLI_AGENT: dict[str, str] = {
+    "SessionStart":     "session_start",
+    "UserPromptSubmit": "prompt_submit",
+    "PostToolUse":      "tool_complete",
+    "PreToolUse":       "permission_request",
+    "Notification":     "idle_prompt",
+    "Stop":             "stop",
 }
-
-
-def should_emit_warp_cli_agent() -> bool:
-    """Gate: only emit when running inside Warp and protocol is advertised."""
-    if os.environ.get("TERM_PROGRAM") != "WarpTerminal":
-        return False
-    # Protocol version advertised by Warp itself — absence means too old.
-    return bool(os.environ.get("WARP_CLI_AGENT_PROTOCOL_VERSION"))
 
 
 def emit_warp_cli_agent_event(
     state: SessionState,
     terminal_tty: str | None,
+    raw_data: HookEventData | None = None,
     /,
 ) -> None:
     """Write an OSC 777 `warp://cli-agent` frame to the terminal TTY.
 
-    Warp's CLI Agent subsystem consumes this to:
-      - Render an inline status dot on the tab,
-      - Post a native macOS notification (for idle/permission/stop events),
-      - Mark the tab as "wakeable" so Shift+Cmd+G can jump to it.
+    Dispatches on `state.event` (the Claude Code hook event name). The
+    `raw_data` is the original hook input; it carries fields we need for
+    event-specific enrichment (`prompt` for UserPromptSubmit,
+    `transcript_path` + `stop_hook_active` for Stop).
     """
     if not terminal_tty or not should_emit_warp_cli_agent():
         return
-
-    cli_event = STATUS_TO_CLI_AGENT_EVENT.get(state.status)
+    cli_event = HOOK_EVENT_TO_CLI_AGENT.get(state.event)
     if not cli_event:
         return
+    # Prevents a double-toast when Claude Code is already inside its stop chain.
+    if cli_event == "stop" and raw_data and raw_data.get("stop_hook_active"):
+        return
 
-    # Negotiate protocol version (min of plugin & Warp)
-    try:
-        warp_v = int(os.environ.get("WARP_CLI_AGENT_PROTOCOL_VERSION", "1"))
-    except ValueError:
-        warp_v = 1
-    version = min(WARP_PROTOCOL_VERSION, warp_v)
-
-    project = Path(state.cwd).name if state.cwd else "unknown"
-    payload: dict[str, object] = {
-        "v": version,
-        "agent": "claude",
-        "event": cli_event,
-        "session_id": state.session_id,
-        "cwd": state.cwd,
-        "project": project,
-    }
-
-    # Per-event enrichment (mirrors build-payload.sh conventions)
-    if cli_event == "permission_request":
-        payload["tool_name"] = state.tool or ""
-        payload["tool_input"] = state.tool_input or {}
-        payload["summary"] = _permission_summary(state)
-    elif cli_event == "post_tool_use":
-        payload["tool_name"] = state.tool or ""
-    elif cli_event == "idle_prompt":
-        payload["summary"] = state.message or "Claude is waiting for input"
-
-    body = json.dumps(payload, separators=(",", ":"))
-    frame = f"\033]777;notify;{WARP_CLI_AGENT_TITLE};{body}\007"
-    try:
-        with open(terminal_tty, "w") as f:
-            f.write(frame)
-    except OSError:
-        pass  # silent: no controlling TTY / permission denied
+    # ... negotiate protocol, build base payload {v, agent, event, session_id,
+    # cwd, project}, then per-event enrichment:
+    #   session_start   → plugin_version
+    #   prompt_submit   → query (from raw_data["prompt"], truncated to 200)
+    #   tool_complete   → tool_name
+    #   permission_request → tool_name, tool_input, summary (human-readable)
+    #   idle_prompt     → summary (state.message or fallback)
+    #   stop            → query, response, transcript_path
+    #                     (query/response pulled from transcript JSONL after 0.3s flush)
 ```
 
 挂接点（`main()`，紧贴 `update_tab_title` 之后）：
 
 ```python
 update_tab_title(status, cwd, terminal_tty)
-emit_warp_cli_agent_event(state, terminal_tty)   # ← 新增
+emit_warp_cli_agent_event(state, terminal_tty, data)   # ← raw hook data forwarded
 ```
 
 两条 OSC 用**同一个** `terminal_tty`，保证 tmux 下归属正确。
 
-### 2. Event / Status 映射
+### 2. Hook Event 映射与 payload 形状
 
-| Claude Island `SessionPhase` | hook `status` | CLI Agent `event` | Warp 侧效果 |
+**关键前提**：Warp CLI Agent parser 对 `event` 字段做精确匹配，并要求每个事件附带特定字段才会进入 `wakeable_tabs` 和触发 `UNUserNotificationCenter`。我们早期错误做法是把 `Stop` hook 映射为 `idle_prompt`，Warp 直接 drop，`Shift+Cmd+G` 无效——这是本 feature 的第一个教训。
+
+| Claude Code hook | CLI Agent `event` | Payload 额外字段 | Warp 侧效果 |
 |---|---|---|---|
-| `.idle` (session 开始) | `session_start` | `session_start` | 绑定 session_id，tab 标记为 agent tab |
-| `.processing` | `processing` | `user_prompt_submit` | tab dot = running |
-| `.processing` (工具执行) | `running_tool` | `post_tool_use` | tab dot = running |
-| `.waitingForInput` | `waiting_for_input` | `idle_prompt` | 弹系统通知 + tab dot = waiting，加入 `wakeable_tabs` |
-| `.waitingForApproval` | `waiting_for_approval` | `permission_request` | 弹系统通知 + tab dot = needs_permission，加入 `wakeable_tabs` |
-| `.compacting` | `compacting` | `user_prompt_submit` | 保持 running 状态（CLI Agent 协议无对应事件） |
-| `.ended` | `ended` | `stop` | 弹系统通知 + tab dot = idle |
+| `SessionStart` | `session_start` | `plugin_version` | 注册 agent，建立 `session_id → pty` 绑定（**前置条件**：没有这一步，后续所有事件被静默丢弃） |
+| `UserPromptSubmit` | `prompt_submit` | `query` (用户输入，截断 200 字符) | tab dot = running |
+| `PostToolUse` | `tool_complete` | `tool_name` | tab dot = running |
+| `PreToolUse` | `permission_request` | `tool_name`、`tool_input`、`summary` | 弹系统通知 + tab dot = needs_permission，加入 `wakeable_tabs` |
+| `Notification` | `idle_prompt` | `summary` | 弹系统通知 + tab dot = waiting，加入 `wakeable_tabs` |
+| `Stop` | `stop` | `query`、`response`、`transcript_path` | 弹系统通知（标题=query，正文=response）+ tab dot = idle，加入 `wakeable_tabs` |
 
-只有 `idle_prompt` / `permission_request` / `stop` 会触发 Warp 端的 `UNUserNotificationCenter`；`user_prompt_submit` / `post_tool_use` 只悄悄更新状态——与 Claude Island 自己的 notch 分工互补：
+未映射的 Claude Code hook（`SessionEnd` / `SubagentStop` / `PreCompact`）在官方插件里也没有对应事件，刻意跳过——不要尝试发明 event 名，Warp 会 drop。
+
+`stop_hook_active=true` 时跳过发送，避免 Claude Code 自己的 stop hook chain 重入导致双重通知。
+
+`query`/`response` 从 `transcript_path` 指向的 JSONL 里解析：休眠 0.3 秒让 Claude Code flush 完当前 turn，读最后一条 `type:"user"` 的纯文本消息（跳过 tool_result）与最后一条 `type:"assistant"` 的文本拼接。截断到 200 字符。
+
+只有 `idle_prompt` / `permission_request` / `stop` 会触发 Warp 端的 `UNUserNotificationCenter`；`session_start` / `prompt_submit` / `tool_complete` 只悄悄更新状态——与 Claude Island 自己的 notch 分工互补：
 
 - **Claude Island notch**：所有细粒度活动（工具运行、token 消耗、状态轮播）；
 - **Warp 原生通知**：仅「需要人」的三类信号，承担「Claude Island 不在前台时把用户拉回来」的职责。

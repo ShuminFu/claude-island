@@ -55,27 +55,29 @@ def _make_state(**overrides: Any) -> Any:
     return HOOK.SessionState(**defaults)
 
 
-class StatusEventMappingTests(unittest.TestCase):
-    """Each Claude Island session status maps to exactly one CLI Agent event,
-    and unknown statuses must NOT emit (silent no-op rather than crash)."""
+class HookEventMappingTests(unittest.TestCase):
+    """Each Claude Code hook event maps to exactly one CLI Agent event, and
+    unmapped hooks (SessionEnd, SubagentStop, PreCompact) must NOT emit — those
+    have no official Warp-side semantics and would desynchronize the tab state.
+    """
 
-    def test_known_statuses_map_to_cli_events(self) -> None:
+    def test_known_hooks_map_to_cli_events(self) -> None:
         expected = {
-            "processing": "user_prompt_submit",
-            "running_tool": "post_tool_use",
-            "waiting_for_input": "idle_prompt",
-            "waiting_for_approval": "permission_request",
-            "compacting": "user_prompt_submit",
-            "ended": "stop",
+            "SessionStart": "session_start",
+            "UserPromptSubmit": "prompt_submit",
+            "PostToolUse": "tool_complete",
+            "PreToolUse": "permission_request",
+            "Notification": "idle_prompt",
+            "Stop": "stop",
         }
-        for status, event in expected.items():
-            with self.subTest(status=status):
-                self.assertEqual(HOOK.STATUS_TO_CLI_AGENT_EVENT.get(status), event)
+        for hook_event, cli_event in expected.items():
+            with self.subTest(hook=hook_event):
+                self.assertEqual(HOOK.HOOK_EVENT_TO_CLI_AGENT.get(hook_event), cli_event)
 
-    def test_unknown_status_has_no_mapping(self) -> None:
-        # "notification" is intentionally absent — Warp has no concept of it.
-        self.assertNotIn("notification", HOOK.STATUS_TO_CLI_AGENT_EVENT)
-        self.assertNotIn("unknown", HOOK.STATUS_TO_CLI_AGENT_EVENT)
+    def test_unmapped_hooks_have_no_entry(self) -> None:
+        for unmapped in ("SessionEnd", "SubagentStop", "PreCompact", "Unknown"):
+            with self.subTest(hook=unmapped):
+                self.assertNotIn(unmapped, HOOK.HOOK_EVENT_TO_CLI_AGENT)
 
 
 class ShouldEmitGateTests(unittest.TestCase):
@@ -148,9 +150,15 @@ class FrameFormatTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.should_patcher.stop()
 
-    def _capture_frame(self, state: Any, terminal_tty: str = "/dev/ttys001") -> str | None:
+    def _capture_frame(
+        self,
+        state: Any,
+        terminal_tty: str = "/dev/ttys001",
+        raw_data: dict[str, Any] | None = None,
+    ) -> str | None:
         """Run emit and return whatever bytes were written via builtins.open."""
         captured: dict[str, str] = {}
+        real_open = open
 
         class _FakeFile:
             def __init__(self) -> None:
@@ -165,62 +173,120 @@ class FrameFormatTests(unittest.TestCase):
             def write(self, s: str) -> int:
                 return self.buf.write(s)
 
-        def fake_open(path: str, mode: str = "r", *_a: Any, **_kw: Any) -> Any:
-            captured["path"] = path
-            return _FakeFile()
+        def fake_open(path: str, mode: str = "r", *a: Any, **kw: Any) -> Any:
+            # Only intercept writes to the terminal TTY. Other opens (config
+            # file, transcript path) go through to the real filesystem so
+            # the stop path can still read transcripts in tests that supply one.
+            if path == terminal_tty:
+                captured["path"] = path
+                return _FakeFile()
+            return real_open(path, mode, *a, **kw)
 
         with mock.patch("builtins.open", side_effect=fake_open):
-            HOOK.emit_warp_cli_agent_event(state, terminal_tty)
+            HOOK.emit_warp_cli_agent_event(state, terminal_tty, raw_data)
 
         return captured.get("frame")
 
-    def test_idle_prompt_frame_shape(self) -> None:
-        state = _make_state(status="waiting_for_input", message="Claude is idle")
-        frame = self._capture_frame(state)
+    def _extract_payload(self, frame: str | None) -> dict[str, Any]:
         self.assertIsNotNone(frame, "emit should have written a frame")
-        assert frame is not None  # for type checker
+        assert frame is not None
         self.assertTrue(frame.startswith("\033]777;notify;warp://cli-agent;"))
         self.assertTrue(frame.endswith("\007"))
-
         body = frame[len("\033]777;notify;warp://cli-agent;") : -1]
-        payload = json.loads(body)
+        result = json.loads(body)
+        assert isinstance(result, dict)
+        return result
+
+    def test_idle_prompt_frame_shape(self) -> None:
+        state = _make_state(event="Notification", message="Claude is idle")
+        payload = self._extract_payload(self._capture_frame(state))
         self.assertEqual(payload["event"], "idle_prompt")
         self.assertEqual(payload["agent"], "claude")
         self.assertEqual(payload["session_id"], "abc-123")
         self.assertEqual(payload["project"], "myproj")
         self.assertEqual(payload["summary"], "Claude is idle")
 
+    def test_session_start_includes_plugin_version(self) -> None:
+        state = _make_state(event="SessionStart")
+        payload = self._extract_payload(self._capture_frame(state))
+        self.assertEqual(payload["event"], "session_start")
+        self.assertEqual(payload["plugin_version"], HOOK.WARP_PLUGIN_VERSION)
+
+    def test_prompt_submit_includes_user_query(self) -> None:
+        state = _make_state(event="UserPromptSubmit")
+        payload = self._extract_payload(
+            self._capture_frame(state, raw_data={"prompt": "what is 2+2"}),
+        )
+        self.assertEqual(payload["event"], "prompt_submit")
+        self.assertEqual(payload["query"], "what is 2+2")
+
+    def test_prompt_submit_truncates_long_query(self) -> None:
+        long_prompt = "x" * 500
+        state = _make_state(event="UserPromptSubmit")
+        payload = self._extract_payload(
+            self._capture_frame(state, raw_data={"prompt": long_prompt}),
+        )
+        self.assertTrue(payload["query"].endswith("..."))
+        self.assertLessEqual(len(payload["query"]), 200)
+
     def test_permission_request_includes_tool_summary(self) -> None:
         state = _make_state(
-            status="waiting_for_approval",
+            event="PreToolUse",
             tool="Bash",
             tool_input={"command": "rm -rf /tmp/foo"},
         )
-        frame = self._capture_frame(state)
-        assert frame is not None
-        body = frame[len("\033]777;notify;warp://cli-agent;") : -1]
-        payload = json.loads(body)
+        payload = self._extract_payload(self._capture_frame(state))
         self.assertEqual(payload["event"], "permission_request")
         self.assertEqual(payload["tool_name"], "Bash")
         self.assertEqual(payload["summary"], "Run Bash: rm -rf /tmp/foo")
 
-    def test_post_tool_use_includes_tool_name(self) -> None:
-        state = _make_state(status="running_tool", tool="Read")
-        frame = self._capture_frame(state)
-        assert frame is not None
-        body = frame[len("\033]777;notify;warp://cli-agent;") : -1]
-        payload = json.loads(body)
-        self.assertEqual(payload["event"], "post_tool_use")
+    def test_tool_complete_includes_tool_name(self) -> None:
+        state = _make_state(event="PostToolUse", tool="Read")
+        payload = self._extract_payload(self._capture_frame(state))
+        self.assertEqual(payload["event"], "tool_complete")
         self.assertEqual(payload["tool_name"], "Read")
 
+    def test_stop_includes_query_response_transcript(self) -> None:
+        # Write a tiny fake transcript so _extract_stop_context can read it.
+        import tempfile
+
+        transcript = (
+            '{"type":"user","message":{"content":"hello"}}\n'
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"hi there"}]}}\n'
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(transcript)
+            tpath = f.name
+
+        try:
+            state = _make_state(event="Stop")
+            with mock.patch.object(HOOK.time, "sleep"):  # skip the 0.3s flush delay
+                payload = self._extract_payload(
+                    self._capture_frame(state, raw_data={"transcript_path": tpath}),
+                )
+            self.assertEqual(payload["event"], "stop")
+            self.assertEqual(payload["query"], "hello")
+            self.assertEqual(payload["response"], "hi there")
+            self.assertEqual(payload["transcript_path"], tpath)
+        finally:
+            os.unlink(tpath)
+
+    def test_stop_skips_when_stop_hook_active(self) -> None:
+        # stop_hook_active=True means Claude is already inside its stop chain —
+        # emitting again would produce a duplicate toast.
+        state = _make_state(event="Stop")
+        with mock.patch("builtins.open", side_effect=AssertionError("open should not be called")):
+            HOOK.emit_warp_cli_agent_event(state, "/dev/ttys001", {"stop_hook_active": True})
+
     def test_no_tty_means_no_frame(self) -> None:
-        state = _make_state(status="waiting_for_input")
-        # terminal_tty=None must early-return without touching the filesystem.
+        state = _make_state(event="Notification")
         with mock.patch("builtins.open", side_effect=AssertionError("open should not be called")):
             HOOK.emit_warp_cli_agent_event(state, None)
 
-    def test_unknown_status_means_no_frame(self) -> None:
-        state = _make_state(status="notification")  # not in STATUS_TO_CLI_AGENT_EVENT
+    def test_unmapped_hook_means_no_frame(self) -> None:
+        state = _make_state(event="SessionEnd")  # not in HOOK_EVENT_TO_CLI_AGENT
         with mock.patch("builtins.open", side_effect=AssertionError("open should not be called")):
             HOOK.emit_warp_cli_agent_event(state, "/dev/ttys001")
 

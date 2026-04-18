@@ -11,6 +11,13 @@ extension NotchView {
     /// Determine if notification sound should play for the given sessions
     /// Returns true if sound should play based on suppression settings
     func shouldPlayNotificationSound(for sessions: [SessionState]) async -> Bool {
+        // Warp ".warpOnly" mode opts out of Island's sound entirely — Warp's
+        // native banner is the user-chosen "needs attention" channel.
+        if AppSettings.warpCLIAgentEnabled,
+           AppSettings.warpCLIAgentNotificationMode == .warpOnly {
+            return false
+        }
+
         let suppressionMode = AppSettings.soundSuppression
 
         // If suppression is disabled, always play sound

@@ -63,6 +63,10 @@ enum HookInstaller {
             return
         }
         await self.updateSettings(at: settings)
+
+        // Sync user-controlled flags (Warp CLI Agent mode, etc.) for the
+        // Python hook to read. Cheap; safe to do unconditionally on install.
+        HookConfigWriter.persist()
     }
 
     /// Check if hooks are currently installed
@@ -98,6 +102,7 @@ enum HookInstaller {
         let settings = claudeDir.appendingPathComponent("settings.json")
 
         try? FileManager.default.removeItem(at: pythonScript)
+        HookConfigWriter.remove()
 
         await self.withLockedSettings(at: settings) { json in
             guard var hooks = json["hooks"] as? [String: Any] else {

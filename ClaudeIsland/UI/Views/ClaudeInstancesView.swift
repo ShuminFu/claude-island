@@ -93,21 +93,7 @@ struct ClaudeInstancesView: View {
 
     private func focusSession(_ session: SessionState) {
         Task(name: "focus-terminal") {
-            var activated = false
-            if let pid = session.pid {
-                activated = await TerminalFocuser.shared.focusTerminal(forClaudePID: pid)
-            }
-            if !activated {
-                activated = await TerminalFocuser.shared.focusTerminal(forWorkingDirectory: session.cwd)
-            }
-
-            // Flash the tab title to help user locate the correct tab
-            if activated, AppSettings.enableTabFlashOnFocus {
-                let tty = session.terminalTTY ?? session.tty
-                if let tty {
-                    await TerminalFocuser.shared.flashTabTitle(tty: tty, projectName: session.projectName)
-                }
-            }
+            await TerminalFocuser.shared.focus(session: session)
         }
     }
 

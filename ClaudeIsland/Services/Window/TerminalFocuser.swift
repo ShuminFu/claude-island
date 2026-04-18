@@ -27,6 +27,75 @@ struct TerminalFocuser: Sendable {
 
     nonisolated static let shared = Self()
 
+    /// Focus the terminal hosting the given Claude session.
+    ///
+    /// Dispatches between two strategies:
+    ///   - **Warp**: writes an OSC 777 `warp://cli-agent` frame to the
+    ///     session's TTY then synthesizes Shift+Cmd+G — Warp's built-in
+    ///     `workspace:jump_to_latest_toast` selects the right tab.
+    ///   - **Other terminals**: existing PID → process-tree → activate flow,
+    ///     followed by an OSC 0 tab-title flash for visual orientation.
+    ///
+    /// Centralizes the logic that used to be duplicated across ChatView,
+    /// ClaudeInstancesView, and NotchViewModel.
+    ///
+    /// - Returns: true when *some* activation succeeded (does not guarantee
+    ///   the user is now staring at the right tab — for non-Warp terminals
+    ///   that's beyond our control).
+    @discardableResult
+    func focus(session: SessionState) async -> Bool {
+        // Resolve the host terminal first — needed both for Warp detection
+        // and for the generic fallback path.
+        let hostInfo: (terminalPID: Int, command: String)? = await Task.detached(
+            name: "find-terminal-for-session",
+            priority: .userInitiated,
+        ) {
+            let tree = ProcessTreeBuilder.shared.buildTree()
+            if let pid = session.pid,
+               let terminalPID = ProcessTreeBuilder.shared.findTerminalPID(forProcess: pid, tree: tree),
+               let info = tree[terminalPID] {
+                return (terminalPID, info.command)
+            }
+            // Fallback: scan for a Claude process with matching cwd.
+            for (pid, info) in tree {
+                guard info.command.lowercased().contains("claude") else { continue }
+                guard ProcessTreeBuilder.shared.getWorkingDirectory(forPID: pid) == session.cwd else { continue }
+                if let terminalPID = ProcessTreeBuilder.shared.findTerminalPID(forProcess: pid, tree: tree),
+                   let terminalInfo = tree[terminalPID] {
+                    return (terminalPID, terminalInfo.command)
+                }
+            }
+            return nil
+        }.value
+
+        // Warp path: OSC 777 + Shift+Cmd+G goes to the specific tab.
+        if let hostInfo, hostInfo.command.lowercased().contains("warp"),
+           let tty = session.terminalTTY ?? session.tty, !tty.isEmpty {
+            return await self.jumpToWarpTab(
+                tty: tty,
+                sessionID: session.sessionID,
+                projectName: session.projectName,
+            )
+        }
+
+        // Generic path: activate by PID, then flash the tab title for orientation.
+        let activated: Bool
+        if let hostInfo {
+            activated = await MainActor.run {
+                self.activateTerminal(terminalPID: hostInfo.terminalPID, command: hostInfo.command)
+            }
+        } else {
+            activated = false
+        }
+
+        if activated, AppSettings.enableTabFlashOnFocus,
+           let tty = session.terminalTTY ?? session.tty {
+            await self.flashTabTitle(tty: tty, projectName: session.projectName)
+        }
+
+        return activated
+    }
+
     /// Focus the terminal app for a given Claude PID
     /// - Parameter claudePID: The process ID of the Claude instance
     /// - Returns: true if the terminal was successfully focused

@@ -239,6 +239,11 @@ terminal_tty: str | None  # 终端真实 TTY（tmux 下为 client TTY）
 - **工作量**: ~1 天
 - **效果**: 支持脚本化的终端可实现真正的精确 tab 跳转
 
+> **Warp 的 Phase 3 已实现，走独立路径**：见 [`warp-cli-agent-notification.md`](./warp-cli-agent-notification.md)。
+> Warp 没有 AppleScript / remote-control，走 OSC 777 `warp://cli-agent` CLI Agent 协议
+> + 合成 `Shift+Cmd+G`，让 Warp 内部的 `focus_tab()` 完成真正的 tab 切换。
+> 其他终端仍按本文计划的 `TerminalTabSwitcher` 协议推进。
+
 ## 配置项
 
 ```swift

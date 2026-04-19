@@ -53,7 +53,7 @@ claude-island-state.py
 |---|---|
 | `claude-island-state.py` 已被 hook 调用，覆盖全部生命周期事件 | 在现有 `main()` 里加一次 OSC 777 写入，和 `update_tab_title(OSC 0)` 并列 |
 | `get_terminal_tty()` 已解析 tmux client TTY | OSC 777 写入使用**同一个** `terminal_tty`，tmux 场景直接可用 |
-| `SessionState.status`（`processing` / `waiting_for_input` / `waiting_for_approval` / `compacting` / `ended`） | 映射到 CLI Agent `event` 字段，见下表 |
+| Claude Code hook 事件（`SessionStart` / `UserPromptSubmit` / `PostToolUse` / `PreToolUse` / `Notification` / `Stop`） | 按 hook 事件名直接派发到 CLI Agent event，见下表 |
 | hook 中已收集 `cwd` / `project name` / `tool_name` / `tool_input` | 直接塞进 payload，无新增数据源 |
 | Swift 端 `TerminalFocuser.flashTabTitle` 已会写 TTY | 可复用同一写入管线从 Swift 端触发「focus this tab」 |
 
@@ -156,7 +156,7 @@ emit_warp_cli_agent_event(state, terminal_tty, data)   # ← raw hook data forwa
 
 #### 思路
 
-1. Hook 已经把目标 tab 放进了 `wakeable_tabs`（`waiting_for_input` / `waiting_for_approval` / `ended` 都会）。
+1. Hook 已经把目标 tab 放进了 `wakeable_tabs`（`Notification`、`PreToolUse`、`Stop` 三个 hook 触发的 `idle_prompt` / `permission_request` / `stop` 都会）。
 2. 若目标 tab **不是**最近一次 agent 事件的所在 tab，先从 Swift 端向目标 tab 的 TTY 再发一次 `idle_prompt` OSC 777——把它「顶」成最新。
 3. 调 Warp 内建 action `workspace:jump_to_latest_toast`——也就是 `Shift+Cmd+G`，通过 CGEvent 合成按键。
 4. Warp 内部会执行完整的 `focus_tab()`：`NSApp.activate()` + `window.makeKeyAndOrderFront` + `selected_tab = N`。
@@ -323,6 +323,20 @@ hook 端用 `CLAUDE_ISLAND_WARP_CLI_AGENT=1/0` 环境变量读到决策结果；
 3. **Tab 顺序依赖「最新 toast」启发式**：多个 Claude 会话同时待命时，`Shift+Cmd+G` 跳到哪个取决于谁最后发事件。Phase 2 的「重发 idle_prompt 把目标顶成最新」是正面利用这个行为，但用户若在其他 Claude tab 里有活动就可能错位——接受这个限制，和 Warp 原生行为一致。
 4. **tmux detached session**：没有 client TTY，整条通路静默失败，和既有 OSC 0 标题更新行为一致。
 5. **双通知**：默认 `.both` 时，Claude Island 的内部通知 + Warp 的系统通知会同时出现。默认模式下用户能从 UI 改到 `.warpOnly` 或 `.islandOnly`，但第一次体验可能吵——`warpCLIAgentNotificationMode` 的初始值建议后续观察用户反馈再调整。
+
+## 调试教训
+
+最初的实现按 Claude Island 内部 `SessionState.status` 派发，`Stop` hook 映射成 `waiting_for_input → idle_prompt`；字节格式正确、TTY 正确、Warp 协议版本也协商成功——但用户端 Warp 毫无反应：没有 toast、tab 不进 `wakeable_tabs`、`Shift+Cmd+G` 也不跳。
+
+真因是 Warp 的 CLI Agent parser 按 `event` 字段名做精确匹配，并且每个事件要求携带特定字段：
+
+- `session_start` 是**注册事件**，缺失则 Warp 不建立 `session_id → pty → agent` 绑定，所有后续事件静默丢弃。
+- `stop` 必须携带 `query` / `response` / `transcript_path`——toast 标题用 query，正文用 response。少一个 Warp 就不渲染 toast。
+- `prompt_submit` 需要 `query`，否则 Warp 的 session ring buffer 出现空白记录。
+
+**排查方法**：拦截官方插件 `warp-notify.sh`，把它每次调用时的 title/body/env/ps 全量落盘（`/tmp/official-real-frames.log`）；然后在日常使用中触发一次真实 Stop，对比它和我们发送的字节差异——五分钟内定位到 event 名与字段缺失。
+
+**教训**：只要下游协议被黑盒消费，任何通过「语义等价」的 fallback 事件名都可能被 drop。遵循「一条 hook 事件 = 一条下游事件」的直译原则，不要加中间语义层。
 
 ## 与已有 `warp-tab-focus.md` 的关系
 

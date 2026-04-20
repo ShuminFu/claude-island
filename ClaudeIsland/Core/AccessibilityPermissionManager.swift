@@ -164,6 +164,27 @@ final class AccessibilityPermissionManager {
         return false
     }
 
+    /// Surface the Accessibility permission alert because a Warp tab-jump
+    /// attempt just silently failed due to missing AX trust.
+    ///
+    /// Guarded by a per-process flag so repeated clicks don't spam the user
+    /// with modal alerts — one nudge per app launch is enough. The underlying
+    /// `shouldShowPermissionWarning` is already driving the notch indicator
+    /// passively; this path only fires when the user has explicitly asked for
+    /// a Warp jump and would otherwise see nothing useful happen.
+    @MainActor
+    func surfaceForWarpJumpIfNeeded() {
+        self.checkPermission()
+        guard !self.isAccessibilityEnabled else { return }
+        guard !self.hasSurfacedWarpJumpPrompt else {
+            Self.logger.info("surfaceForWarpJumpIfNeeded: already prompted this session")
+            return
+        }
+        self.hasSurfacedWarpJumpPrompt = true
+        Self.logger.warning("Surfacing AX permission alert — triggered by Warp tab jump")
+        _ = self.showPermissionAlert()
+    }
+
     /// Handle app becoming active - check permission and restart fast polling if needed
     func handleAppActivation() {
         let previousState = self.isAccessibilityEnabled
@@ -192,6 +213,10 @@ final class AccessibilityPermissionManager {
     nonisolated private static let logger = Logger(subsystem: "com.engels74.ClaudeIsland", category: "AccessibilityPermission")
 
     @ObservationIgnored private var pollingTask: Task<Void, Never>?
+
+    /// Whether we've already surfaced the AX permission alert from the Warp
+    /// tab-jump path this process lifetime. Prevents modal-spam on repeat clicks.
+    @ObservationIgnored private var hasSurfacedWarpJumpPrompt = false
 
     /// Time when monitoring started (for adaptive polling)
     @ObservationIgnored private var monitoringStartTime: Date?

@@ -69,12 +69,20 @@ struct TerminalFocuser: Sendable {
         }.value
 
         // Warp path: OSC 777 + Shift+Cmd+G goes to the specific tab.
-        if let hostInfo, hostInfo.command.lowercased().contains("warp"),
-           let tty = session.terminalTTY ?? session.tty, !tty.isEmpty {
-            return await self.jumpToWarpTab(
-                tty: tty,
-                sessionID: session.sessionID,
-                projectName: session.projectName,
+        if let hostInfo, hostInfo.command.lowercased().contains("warp") {
+            if let tty = session.terminalTTY ?? session.tty, !tty.isEmpty {
+                return await self.jumpToWarpTab(
+                    tty: tty,
+                    sessionID: session.sessionID,
+                    projectName: session.projectName,
+                )
+            }
+            // Explicit diagnostic — previously this fell silently through to
+            // the generic activate path and the user just saw "Warp came to
+            // front on the wrong tab". Common causes: tmux detached session,
+            // hook never fired for this session yet.
+            Self.logger.warning(
+                "Warp detected but no TTY (session=\(session.sessionID)) — falling back to activate-only",
             )
         }
 

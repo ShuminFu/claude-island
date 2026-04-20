@@ -123,21 +123,29 @@ HOOK_CONFIG_PATH = Path.home() / ".claude" / ".claude-island-hook-config.json"
 
 # Claude Code hook event → Warp CLI Agent event. One-to-one with the official
 # `claude-code-warp` plugin's hooks.json. Events outside this map are
-# intentionally not forwarded (SessionEnd, SubagentStop, PreCompact) — they
-# have no official Warp-side semantics and silently desynchronize the tab.
+# intentionally not forwarded (SessionEnd, SubagentStop, PreCompact, PreToolUse)
+# — they have no official Warp-side semantics. PreToolUse in particular fires
+# for *every* tool call, so mapping it to `permission_request` produces a toast
+# on every Bash/Grep/Read; the real signal is Claude Code's dedicated
+# `PermissionRequest` hook, which only fires when user approval is required.
 HOOK_EVENT_TO_CLI_AGENT: dict[str, str] = {
     "SessionStart": "session_start",
     "UserPromptSubmit": "prompt_submit",
     "PostToolUse": "tool_complete",
-    "PreToolUse": "permission_request",
+    "PermissionRequest": "permission_request",
     "Notification": "idle_prompt",
     "Stop": "stop",
 }
 
-# Phase 4: known-bad Warp versions where the CLI Agent path misbehaves.
-# Add entries here to silently downgrade affected users to OSC 0 only.
-# Match against TERM_PROGRAM_VERSION exactly. Remove once Warp ships a fix.
-WARP_BAD_VERSIONS: frozenset[str] = frozenset()
+# Last known Warp release per channel that unconditionally set
+# WARP_CLI_AGENT_PROTOCOL_VERSION without gating it behind the
+# HOANotifications feature flag. These builds advertise protocol support but
+# can't actually render structured notifications. Mirrors the thresholds in
+# `claude-code-warp/plugins/warp/scripts/should-use-structured.sh`. Bump when
+# upstream publishes a newer broken release.
+WARP_LAST_BROKEN_DEV = ""
+WARP_LAST_BROKEN_STABLE = "v0.2026.03.25.08.24.stable_05"
+WARP_LAST_BROKEN_PREVIEW = "v0.2026.03.25.08.24.preview_05"
 
 # Stderr log prefix — Claude Code captures hook stderr, makes it greppable.
 _LOG_PREFIX = "[claude-island/warp]"
@@ -168,20 +176,41 @@ def _load_hook_config() -> dict[str, object]:
 
 
 def should_emit_warp_cli_agent() -> bool:
-    """Gate: only emit when running inside Warp with a known-good version
+    """Gate: only emit when Warp advertises a working CLI Agent protocol
     AND the user has not opted out via Settings (mode != "island-only").
-    """
-    if os.environ.get("TERM_PROGRAM") != "WarpTerminal":
-        return False
 
-    # Protocol version is advertised by Warp itself — absence means too old.
+    Mirrors the upstream plugin's `should-use-structured.sh`:
+      1. Trust `WARP_CLI_AGENT_PROTOCOL_VERSION` rather than `TERM_PROGRAM`,
+         so the plugin works over SSH into Warp hosts where the remote shell
+         clobbers `TERM_PROGRAM` but Warp forwards the protocol env var.
+      2. Require `WARP_CLIENT_VERSION` and reject builds at/below the last
+         known-broken release per channel — those builds set the protocol
+         version env var but can't actually render structured notifications.
+    """
+    # Protocol version is advertised by Warp itself — absence means either
+    # not-Warp or a Warp too old to understand CLI Agent frames.
     if not os.environ.get("WARP_CLI_AGENT_PROTOCOL_VERSION"):
         return False
 
-    # Phase 4: skip known-bad Warp versions.
-    warp_version = os.environ.get("TERM_PROGRAM_VERSION", "")
-    if warp_version in WARP_BAD_VERSIONS:
-        _log_warp(f"skip: blacklisted Warp version {warp_version!r}")
+    # Client version must be present: catches the broken prod release that
+    # advertised protocol support before client version was populated.
+    warp_client_version = os.environ.get("WARP_CLIENT_VERSION", "")
+    if not warp_client_version:
+        return False
+
+    # Channel-scoped threshold: if this build matches a known channel and
+    # the version string sorts at/below the last broken release for that
+    # channel, skip. (Warp's version strings are lexically comparable
+    # within a channel — same scheme the upstream bash uses.)
+    threshold = ""
+    if "dev" in warp_client_version:
+        threshold = WARP_LAST_BROKEN_DEV
+    elif "stable" in warp_client_version:
+        threshold = WARP_LAST_BROKEN_STABLE
+    elif "preview" in warp_client_version:
+        threshold = WARP_LAST_BROKEN_PREVIEW
+    if threshold and warp_client_version <= threshold:
+        _log_warp(f"skip: Warp client version {warp_client_version!r} at/below broken threshold {threshold!r}")
         return False
 
     # Swift-side toggle (Phase 3). Mode == "island-only" disables OSC 777.
@@ -481,7 +510,7 @@ def get_terminal_tty(tty: str | None, /) -> str | None:
         )
         if client_tty := result.stdout.strip():
             return client_tty
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired, OSError:
         pass
 
     return tty  # Fallback

@@ -74,6 +74,7 @@ struct TerminalFocuser: Sendable {
                 return await self.jumpToWarpTab(
                     tty: tty,
                     sessionID: session.sessionID,
+                    cwd: session.cwd,
                     projectName: session.projectName,
                 )
             }

@@ -2,8 +2,8 @@
 //  TerminalFocuser+Warp.swift
 //  ClaudeIsland
 //
-//  Warp-specific tab focus path: OSC 777 `warp://cli-agent` + Shift+Cmd+G.
-//  See docs/features/warp-cli-agent-notification.md.
+//  Warp-specific tab focus path: AX "Switch to Next Tab" menu walk.
+//  See docs/features/warp-tab-jump-hardening.md.
 //
 
 import AppKit
@@ -15,43 +15,39 @@ import os
 extension TerminalFocuser {
     // MARK: - Warp tab jump
 
-    /// Jump to the specific Warp tab that hosts the given Claude session.
+    /// Jump to the Warp tab whose window title matches the session's project.
     ///
-    /// Mechanism:
-    ///   1. Re-emit an `idle_prompt` OSC 777 frame to the target tab's TTY,
-    ///      promoting it to "most recent agent event" in Warp's wakeable_tabs queue.
-    ///   2. Activate Warp (NSRunningApplication.activate — required because
-    ///      key synthesis only succeeds inside the target app's main loop).
-    ///   3. Synthesize Shift+Cmd+G — Warp's built-in
-    ///      `workspace:jump_to_latest_toast` shortcut, which calls
-    ///      Warp's internal `focus_tab()` (selected_tab = N + window raise).
+    /// Why this shape: the earlier OSC 777 + Shift+Cmd+G path only worked when
+    /// the OSC was written by an in-pty process (the Python hook). External
+    /// writes to `/dev/ttysNNN` from Claude Island's GUI process reach the pty
+    /// at the byte level but Warp does not register them as CLI agent toasts,
+    /// so `workspace:jump_to_latest_toast` had nothing new to jump to and
+    /// landed on whatever tab produced the most recent real toast.
     ///
-    /// Falls back gracefully:
-    ///   - No TTY available → returns false (caller should fall back to the
-    ///     generic activate-terminal path).
-    ///   - No Accessibility permission → keystroke synthesis silently fails;
-    ///     Warp is still activated so the user lands on *some* Warp tab.
+    /// Warp also exposes neither its tab bar nor per-tab AX windows — the
+    /// terminal area is GPU-rendered. The only per-tab AX surface we have is
+    /// the single AXWindow title, which reflects the currently selected tab.
+    /// So we walk tabs via the "Switch to Next Tab" menu item (an AXMenuItem
+    /// we *can* invoke) and stop when the window title matches the target.
     ///
     /// - Parameters:
-    ///   - tty: TTY path, may include or omit the `/dev/` prefix.
-    ///   - sessionID: Claude session UUID (Warp uses for correlation only).
-    ///   - projectName: Used in the OSC payload's `project` field.
-    /// - Returns: `true` when the OSC frame was written. The keystroke step
-    ///   is best-effort — we cannot observe Warp's internal selection state.
+    ///   - tty: Retained for logging + diagnostic parity with the old API.
+    ///   - sessionID: Retained for logging.
+    ///   - cwd: Currently unused; kept for API stability.
+    ///   - projectName: The substring we search for in `AXWindow.title`.
+    /// - Returns: `true` when a matching tab was reached.
     @MainActor
     @discardableResult
     func jumpToWarpTab(
         tty: String,
         sessionID: String,
+        cwd: String,
         projectName: String,
     ) async -> Bool {
-        let resolvedTTY = tty.hasPrefix("/dev/") ? tty : "/dev/\(tty)"
+        _ = tty
+        _ = cwd
+        Self.warpLogger.info("jumpToWarpTab: session=\(sessionID) project=\(projectName)")
 
-        Self.warpLogger.info("jumpToWarpTab: tty=\(resolvedTTY), session=\(sessionID)")
-
-        // 0. AX permission gate. CGEvent.post silently drops when untrusted —
-        // bail before even trying the keystroke so we can surface the real
-        // reason to the user instead of leaving them on an unrelated Warp tab.
         guard AXIsProcessTrusted() else {
             Self.warpLogger.warning("jumpToWarpTab: AX not trusted — falling back to activate-only")
             AccessibilityPermissionManager.shared.surfaceForWarpJumpIfNeeded()
@@ -59,86 +55,158 @@ extension TerminalFocuser {
             return false
         }
 
-        // 1. Re-emit idle_prompt so the target tab becomes the latest agent toast.
-        let emitted = self.emitWarpCLIAgentIdle(
-            ttyPath: resolvedTTY,
-            sessionID: sessionID,
-            projectName: projectName,
-        )
-        guard emitted else {
-            Self.warpLogger.warning("emit failed for \(resolvedTTY) — aborting jump")
+        guard let warp = Self.findRunningWarp() else {
+            Self.warpLogger.warning("jumpToWarpTab: no running Warp — nothing to do")
             return false
         }
+        _ = warp.activate()
 
-        // Tiny delay so Warp's pty reader picks up the frame before the
-        // keystroke arrives. Warp processes both on its main thread; ordering
-        // matters for the wakeable_tabs queue update to land first.
-        try? await Task.sleep(for: .milliseconds(50))
-
-        Self.warpLogger.info("jumpToWarpTab: OSC emit ok, activating Warp")
-
-        // 2. Activate Warp (idempotent — the click-to-notification path also does this).
-        let warp = Self.findRunningWarp()
-        if let warp {
-            _ = warp.activate()
-        } else {
-            Self.warpLogger.warning("no running Warp instance found — keystroke will fall on whatever app is frontmost")
-        }
-
-        // Wait for Warp to actually become frontmost. From a non-activating
-        // NSPanel (our notch) Warp usually stays frontmost the whole time —
-        // this returns in ~1ms on the happy path — but the poll still guards
-        // the edge case where Island steals focus or Warp is occluded.
         let becameFront = await self.waitForFrontmost(
             bundleIDs: Self.warpBundleIDs,
             timeout: .milliseconds(500),
         )
-        let warpPID = warp?.processIdentifier
-        Self.warpLogger.info(
-            "jumpToWarpTab: waitForFrontmost=\(becameFront) pid=\(warpPID ?? -1)",
-        )
         if !becameFront {
-            let current = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"
-            Self.warpLogger.warning(
-                "jumpToWarpTab: Warp did not become frontmost within 500ms (current=\(current)) — posting keystroke anyway",
-            )
+            Self.warpLogger.warning("jumpToWarpTab: Warp did not become frontmost within 500ms — proceeding anyway")
         }
 
-        // 3. Deliver Shift+Cmd+G directly to Warp's process.
-        //
-        // CGEvent.post(tap: .cghidEventTap) goes through the global HID queue
-        // and was observed to land nowhere when triggered from our non-
-        // activating notch panel (every log step succeeded but Warp didn't
-        // react). CGEventPostToPid routes the key straight into Warp and
-        // bypasses whatever is swallowing the global-tap path.
-        let posted = await self.sendJumpToLatestToast(targetPID: warpPID)
-        Self.warpLogger.info("jumpToWarpTab: sendJumpToLatestToast=\(posted)")
-        if !posted {
-            Self.warpLogger.error("Shift+Cmd+G synthesis failed via all paths")
+        let appElement = AXUIElementCreateApplication(warp.processIdentifier)
+        guard let frontWindow = Self.axFrontWindow(app: appElement) else {
+            Self.warpLogger.warning("jumpToWarpTab: could not read AXFocusedWindow")
+            return false
         }
 
-        return posted
+        // Already on the right tab? Fast-path.
+        let startTitle = Self.axTitle(frontWindow) ?? ""
+        if Self.titleMatches(startTitle, project: projectName) {
+            Self.warpLogger.info("jumpToWarpTab: already on target tab \"\(startTitle)\"")
+            return true
+        }
+
+        guard let nextTabItem = Self.axFindMenuItem(app: appElement, path: ["Tab", "Switch to Next Tab"]) else {
+            Self.warpLogger.error("jumpToWarpTab: AX could not locate Tab > Switch to Next Tab")
+            return false
+        }
+
+        // Cycle up to 20 tabs; stop early if title matches or we return to the
+        // starting tab (meaning we've looped and no tab matches).
+        let maxTabs = 20
+        for step in 1...maxTabs {
+            AXUIElementPerformAction(nextTabItem, kAXPressAction as CFString)
+            // Warp updates AXWindow.title synchronously on tab switch, but
+            // give the main thread a beat to repaint + commit the change.
+            try? await Task.sleep(for: .milliseconds(25))
+            let title = Self.axTitle(frontWindow) ?? ""
+            if Self.titleMatches(title, project: projectName) {
+                Self.warpLogger.info("jumpToWarpTab: matched tab \"\(title)\" after \(step) step(s)")
+                return true
+            }
+            if step > 1, title == startTitle {
+                Self.warpLogger.warning("jumpToWarpTab: cycled back to \"\(startTitle)\" without matching project=\(projectName)")
+                return false
+            }
+        }
+
+        Self.warpLogger.warning("jumpToWarpTab: gave up after \(maxTabs) steps, last title=\(Self.axTitle(frontWindow) ?? "")")
+        return false
+    }
+
+    // MARK: - Title match
+
+    /// True when `windowTitle` contains `projectName` as a substring.
+    ///
+    /// Warp's tab title for a Claude session looks like
+    /// `"✳ Investigate color inconsistency between web and app"` during an
+    /// active request and `"⏸ Claude: <projectName>"` when idle. Matching on
+    /// the project substring covers the idle case directly; for active-request
+    /// titles Warp derives them from the prompt rather than the project, so
+    /// this fallback will miss — acceptable trade-off until Warp exposes more.
+    nonisolated static func titleMatches(_ windowTitle: String, project: String) -> Bool {
+        guard !project.isEmpty else { return false }
+        return windowTitle.localizedCaseInsensitiveContains(project)
+    }
+
+    // MARK: - AX helpers
+
+    nonisolated static func axTitle(_ element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &value) == .success else {
+            return nil
+        }
+        return value as? String
+    }
+
+    nonisolated static func axFrontWindow(app: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &value) == .success,
+           let value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+            // swiftlint:disable:next force_cast
+            return (value as! AXUIElement)
+        }
+        if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+           let arr = value as? [AXUIElement], let first = arr.first {
+            return first
+        }
+        return nil
+    }
+
+    /// Walk the AX menu bar to find a nested AXMenuItem by title path.
+    nonisolated static func axFindMenuItem(app: AXUIElement, path: [String]) -> AXUIElement? {
+        var barValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &barValue) == .success,
+              let barValue, CFGetTypeID(barValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        // swiftlint:disable:next force_cast
+        var current: AXUIElement = (barValue as! AXUIElement)
+        for (index, segment) in path.enumerated() {
+            var childrenValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+                  let children = childrenValue as? [AXUIElement] else {
+                return nil
+            }
+            // Menu bar items expose their items via a nested AXMenu child —
+            // when not on the first segment (which is a top-level AXMenuBarItem
+            // we look up by title directly), step into the AXMenu first.
+            let pool: [AXUIElement]
+            if index == 0 {
+                pool = children
+            } else if let menu = children.first(where: { axRole($0) == "AXMenu" }) {
+                var subValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(menu, kAXChildrenAttribute as CFString, &subValue) == .success,
+                      let subChildren = subValue as? [AXUIElement] else {
+                    return nil
+                }
+                pool = subChildren
+            } else {
+                pool = children
+            }
+            guard let match = pool.first(where: { axTitle($0) == segment }) else {
+                return nil
+            }
+            current = match
+        }
+        return current
+    }
+
+    nonisolated static func axRole(_ element: AXUIElement) -> String {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success else {
+            return ""
+        }
+        return (value as? String) ?? ""
     }
 
     /// Locate whichever Warp variant is currently running.
     @MainActor
-    private static func findRunningWarp() -> NSRunningApplication? {
+    static func findRunningWarp() -> NSRunningApplication? {
         NSRunningApplication.runningApplications(withBundleIdentifier: "dev.warp.Warp-Stable").first
             ?? NSRunningApplication.runningApplications(withBundleIdentifier: "dev.warp.Warp").first
     }
 
     // MARK: - Frontmost polling
 
-    /// Poll `NSWorkspace.shared.frontmostApplication` until one of the given
-    /// bundle IDs is frontmost or the timeout elapses.
-    ///
-    /// `NSRunningApplication.activate()` is async at the WindowServer level —
-    /// blindly sleeping a fixed interval is either too short (Warp not yet
-    /// frontmost → keystroke lands on whatever was before) or too long
-    /// (perceivable lag). Polling gives us both a tight happy-path and an
-    /// observable slow-path.
     @MainActor
-    private func waitForFrontmost(bundleIDs: [String], timeout: Duration) async -> Bool {
+    func waitForFrontmost(bundleIDs: [String], timeout: Duration) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
             if let current = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
@@ -150,125 +218,8 @@ extension TerminalFocuser {
         return false
     }
 
-    // MARK: - OSC 777 emitter (Swift side)
-
-    /// Write an `idle_prompt` OSC 777 frame to a Warp tab's TTY.
-    ///
-    /// This intentionally mirrors the Python `emit_warp_cli_agent_event`
-    /// frame format. We do *not* read the Swift-side notification mode here —
-    /// `jumpToWarpTab` is a user-initiated action ("focus this tab"), so the
-    /// Phase 3 mode opt-out doesn't apply. The hook-side opt-out only governs
-    /// passive emission during normal session activity.
-    @MainActor
-    private func emitWarpCLIAgentIdle(
-        ttyPath: String,
-        sessionID: String,
-        projectName: String,
-    ) -> Bool {
-        let payload: [String: Any] = [
-            "v": 1,
-            "agent": "claude",
-            "event": "idle_prompt",
-            "session_id": sessionID,
-            "project": projectName,
-            "summary": "Focus requested from Claude Island",
-        ]
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
-              let body = String(data: bodyData, encoding: .utf8)
-        else {
-            Self.warpLogger.error("emitWarpCLIAgentIdle: failed to serialize payload")
-            return false
-        }
-
-        let frame = "\u{1b}]777;notify;warp://cli-agent;\(body)\u{07}"
-
-        guard let handle = FileHandle(forWritingAtPath: ttyPath) else {
-            Self.warpLogger.warning("emitWarpCLIAgentIdle: cannot open \(ttyPath) for write")
-            return false
-        }
-        defer { handle.closeFile() }
-
-        do {
-            try handle.write(contentsOf: Data(frame.utf8))
-            Self.warpLogger.info("emitWarpCLIAgentIdle: wrote \(frame.utf8.count) bytes to \(ttyPath)")
-            return true
-        } catch {
-            Self.warpLogger.warning("emitWarpCLIAgentIdle: write failed: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    // MARK: - Key synthesis
-
-    /// Send Warp's "jump to latest toast" shortcut (Shift+Cmd+G).
-    ///
-    /// Tries progressively less invasive paths:
-    ///   1. `CGEventPostToPid(targetPID, …)` — delivers the key straight into
-    ///      Warp's process, skipping the global HID queue that was observed
-    ///      to silently swallow events fired from our non-activating notch.
-    ///   2. Global `.cghidEventTap` post — legacy path, retained as a fallback
-    ///      when the PID is unknown or the pid-targeted call fails.
-    ///   3. NSAppleScript via System Events — survives some AX configurations
-    ///      where the CGEvent bridge misbehaves.
-    @MainActor
-    private func sendJumpToLatestToast(targetPID: pid_t?) async -> Bool {
-        if let targetPID, self.postKeystroke(keyCode: 0x05, flags: [.maskCommand, .maskShift], targetPID: targetPID) {
-            return true
-        }
-        if self.postKeystroke(keyCode: 0x05, flags: [.maskCommand, .maskShift], targetPID: nil) {
-            return true
-        }
-        Self.warpLogger.warning("CGEvent keystroke failed — falling back to AppleScript")
-        return await Self.postKeystrokeViaAppleScript()
-    }
-
-    /// Post a single modified key either to `targetPID` (via `CGEventPostToPid`)
-    /// or to the global HID event tap when `targetPID` is nil.
-    /// Returns true when both keyDown and keyUp events were created and posted.
-    @MainActor
-    private func postKeystroke(keyCode: CGKeyCode, flags: CGEventFlags, targetPID: pid_t?) -> Bool {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        guard
-            let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-            let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
-        else {
-            return false
-        }
-        down.flags = flags
-        up.flags = flags
-        if let targetPID {
-            down.postToPid(targetPID)
-            up.postToPid(targetPID)
-            Self.warpLogger.info("postKeystroke: delivered Shift+Cmd+G to pid \(targetPID)")
-        } else {
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
-        }
-        return true
-    }
-
-    /// Backup keystroke path via System Events. Requires the same
-    /// Accessibility permission as CGEvent but uses a different code path
-    /// that sometimes survives when CGEvent creation returns nil.
-    nonisolated private static func postKeystrokeViaAppleScript() async -> Bool {
-        await Task.detached(priority: .userInitiated) {
-            let source = """
-            tell application "System Events" to keystroke "g" using {command down, shift down}
-            """
-            var err: NSDictionary?
-            let script = NSAppleScript(source: source)
-            _ = script?.executeAndReturnError(&err)
-            if let err {
-                Self.warpLogger.warning("AppleScript keystroke failed: \(err)")
-                return false
-            }
-            return true
-        }.value
-    }
-
     // MARK: - Constants
 
-    /// Bundle IDs for every Warp variant we recognise as frontmost.
     nonisolated static let warpBundleIDs = [
         "dev.warp.Warp-Stable",
         "dev.warp.Warp",
